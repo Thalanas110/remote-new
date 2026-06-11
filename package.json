@@ -8,6 +8,7 @@
     "build": "vite build --configLoader runner",
     "build:dev": "vite build --mode development --configLoader runner",
     "preview": "vite preview --configLoader runner",
+    "test:obs-remote-studio": "node --test --experimental-strip-types src/lib/obs-client.remote-studio.test.ts",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

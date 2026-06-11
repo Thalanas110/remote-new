@@ -8,9 +8,9 @@ export type ObsConfig = {
 export type ObsState = {
   connected: boolean;
   currentScene: string | null;
-  previewScene: string | null;
   scenes: string[];
-  studioMode: boolean;
+  remoteStudioMode: boolean;
+  remotePreviewScene: string | null;
   streaming: boolean;
   recording: boolean;
   recordPaused: boolean;
@@ -21,9 +21,9 @@ export type ObsState = {
 export const defaultObsState: ObsState = {
   connected: false,
   currentScene: null,
-  previewScene: null,
   scenes: [],
-  studioMode: false,
+  remoteStudioMode: false,
+  remotePreviewScene: null,
   streaming: false,
   recording: false,
   recordPaused: false,
@@ -68,16 +68,15 @@ export class ObsClient {
     this.obs.off("ConnectionClosed" as any);
     this.obs.on("ConnectionClosed", () => this.update({ connected: false }));
     this.obs.on("CurrentProgramSceneChanged", (d: any) =>
-      this.update({ currentScene: d.sceneName })
-    );
-    this.obs.on("CurrentPreviewSceneChanged", (d: any) =>
-      this.update({ previewScene: d.sceneName })
+      this.update({
+        currentScene: d.sceneName,
+        remotePreviewScene: this.state.remoteStudioMode
+          ? this.state.remotePreviewScene
+          : d.sceneName,
+      })
     );
     this.obs.on("SceneListChanged", (d: any) =>
       this.update({ scenes: d.scenes.map((s: any) => s.sceneName).reverse() })
-    );
-    this.obs.on("StudioModeStateChanged", (d: any) =>
-      this.update({ studioMode: d.studioModeEnabled })
     );
     this.obs.on("StreamStateChanged", (d: any) =>
       this.update({ streaming: d.outputActive })
@@ -92,7 +91,6 @@ export class ObsClient {
 
   async refreshAll() {
     const sceneList: any = await this.obs.call("GetSceneList");
-    const studio: any = await this.obs.call("GetStudioModeEnabled");
     const stream: any = await this.obs.call("GetStreamStatus");
     const record: any = await this.obs.call("GetRecordStatus");
     let vcam = false;
@@ -103,8 +101,10 @@ export class ObsClient {
     this.update({
       scenes: sceneList.scenes.map((s: any) => s.sceneName).reverse(),
       currentScene: sceneList.currentProgramSceneName,
-      previewScene: sceneList.currentPreviewSceneName ?? null,
-      studioMode: studio.studioModeEnabled,
+      remotePreviewScene:
+        this.state.remoteStudioMode && this.state.remotePreviewScene
+          ? this.state.remotePreviewScene
+          : sceneList.currentProgramSceneName,
       streaming: stream.outputActive,
       recording: record.outputActive,
       recordPaused: record.outputPaused,
@@ -112,19 +112,37 @@ export class ObsClient {
     });
   }
 
-  setScene(name: string) {
-    return this.state.studioMode
-      ? this.obs.call("SetCurrentPreviewScene", { sceneName: name })
-      : this.obs.call("SetCurrentProgramScene", { sceneName: name });
+  async setScene(name: string) {
+    if (this.state.remoteStudioMode) {
+      this.update({ remotePreviewScene: name });
+      return;
+    }
+
+    await this.obs.call("SetCurrentProgramScene", { sceneName: name });
   }
   setProgramScene(name: string) {
     return this.obs.call("SetCurrentProgramScene", { sceneName: name });
   }
-  triggerTransition() {
-    return this.obs.call("TriggerStudioModeTransition");
+  async triggerTransition() {
+    const sceneName = this.state.remotePreviewScene;
+    if (!sceneName || sceneName === this.state.currentScene) {
+      return;
+    }
+
+    await this.obs.call("SetCurrentProgramScene", { sceneName });
+    this.update({ currentScene: sceneName });
+  }
+  toggleRemoteStudio() {
+    const next = !this.state.remoteStudioMode;
+    this.update({
+      remoteStudioMode: next,
+      remotePreviewScene: next
+        ? this.state.remotePreviewScene ?? this.state.currentScene
+        : this.state.currentScene,
+    });
   }
   toggleStudio() {
-    return this.obs.call("SetStudioModeEnabled", { studioModeEnabled: !this.state.studioMode });
+    this.toggleRemoteStudio();
   }
   toggleStream() {
     return this.obs.call("ToggleStream");

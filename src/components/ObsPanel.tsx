@@ -6,6 +6,8 @@ export function ObsPanel() {
   const [s, setS] = useState<ObsState>(defaultObsState);
   useEffect(() => { const u = obsClient.subscribe(setS); return () => { u(); }; }, []);
   const offline = !s.connected;
+  const remoteStudioOn = s.remoteStudioMode;
+  const previewScene = s.remotePreviewScene;
 
   const call = (fn: () => Promise<unknown> | unknown) => () => Promise.resolve(fn()).catch(console.error);
 
@@ -40,7 +42,7 @@ export function ObsPanel() {
       <div className="mt-4 grid grid-cols-3 gap-2">
         <StatusCard label="Stream" active={s.streaming} accent="var(--live)" icon={<Radio className="h-4 w-4" />} />
         <StatusCard label="Record" active={s.recording} paused={s.recordPaused} accent="var(--rec)" icon={<Circle className="h-4 w-4 fill-current" />} />
-        <StatusCard label="Studio" active={s.studioMode} accent="var(--obs)" icon={<Eye className="h-4 w-4" />} />
+        <StatusCard label="Remote Studio" active={remoteStudioOn} accent="var(--obs)" icon={<Eye className="h-4 w-4" />} />
       </div>
 
       {/* Controls */}
@@ -54,8 +56,8 @@ export function ObsPanel() {
         <Btn onClick={call(() => obsClient.toggleRecordPause())} disabled={offline || !s.recording}>
           {s.recordPaused ? <><Play className="h-3.5 w-3.5" /> Resume</> : <><Pause className="h-3.5 w-3.5" /> Pause</>}
         </Btn>
-        <Btn onClick={call(() => obsClient.toggleStudio())} active={s.studioMode} accent="var(--obs)" disabled={offline}>
-          Studio Mode
+        <Btn onClick={call(() => obsClient.toggleRemoteStudio())} active={remoteStudioOn} accent="var(--obs)" disabled={offline}>
+          Remote Studio
         </Btn>
       </div>
 
@@ -63,16 +65,21 @@ export function ObsPanel() {
       <div className="mt-4 flex flex-1 flex-col min-h-0">
         <div className="mb-2 flex items-center justify-between">
           <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Scenes</h3>
-          {s.studioMode && (
+          {remoteStudioOn && (
             <button
               onClick={call(() => obsClient.triggerTransition())}
-              disabled={offline}
+              disabled={offline || !previewScene || previewScene === s.currentScene}
               className="btn-tap inline-flex items-center gap-1.5 rounded-lg bg-[var(--obs)]/15 px-3 py-1.5 text-xs font-semibold text-[var(--obs)] hover:bg-[var(--obs)]/25 disabled:opacity-40"
             >
               Transition <ArrowRight className="h-3.5 w-3.5" />
             </button>
           )}
         </div>
+        {remoteStudioOn && (
+          <p className="mb-2 text-[11px] text-muted-foreground">
+            Preview stays on this remote until you press Transition.
+          </p>
+        )}
         <div className="grid flex-1 auto-rows-min grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-2">
           {s.scenes.length === 0 && (
             <div className="col-span-2 rounded-xl border border-dashed border-border p-6 text-center text-xs text-muted-foreground">
@@ -81,12 +88,16 @@ export function ObsPanel() {
           )}
           {s.scenes.map((name) => {
             const isProgram = s.currentScene === name;
-            const isPreview = s.studioMode && s.previewScene === name;
+            const isPreview = remoteStudioOn && previewScene === name;
             return (
               <button
                 key={name}
                 onClick={call(() => obsClient.setScene(name))}
-                onDoubleClick={call(() => obsClient.setProgramScene(name))}
+                onDoubleClick={call(() => {
+                  if (!remoteStudioOn) {
+                    return obsClient.setProgramScene(name);
+                  }
+                })}
                 className={`btn-tap group relative overflow-hidden rounded-xl border p-3 text-left transition ${
                   isProgram ? "border-transparent live-glow" : isPreview ? "border-[var(--obs)]" : "border-border hover:border-foreground/30"
                 }`}
