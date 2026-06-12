@@ -8,6 +8,23 @@ export function ObsPanel() {
   const offline = !s.connected;
   const remoteStudioOn = s.remoteStudioMode;
   const previewScene = s.remotePreviewScene;
+  const monitor = s.programMonitor;
+  const monitorUpdatedAt = monitor.lastUpdatedAt
+    ? new Date(monitor.lastUpdatedAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+    : null;
+  const monitorStatus = !s.connected
+    ? "Disconnected"
+    : monitor.loading && !monitor.imageDataUrl
+      ? "Loading..."
+      : monitor.error && !monitor.imageDataUrl
+        ? "Unavailable"
+        : monitorUpdatedAt
+          ? `Updated ${monitorUpdatedAt}`
+          : "Waiting for frame";
 
   const call = (fn: () => Promise<unknown> | unknown) => () => Promise.resolve(fn()).catch(console.error);
 
@@ -37,6 +54,48 @@ export function ObsPanel() {
           OBS is disconnected. The ProPresenter panel can still be used if it is online.
         </div>
       )}
+
+      <div className="mt-4 rounded-xl border border-border bg-card/60 p-3">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Live Program</h3>
+            <p className="text-xs text-muted-foreground">{monitorStatus}</p>
+          </div>
+          {monitor.error && monitor.imageDataUrl && (
+            <span className="pill text-amber-200" style={{ background: "rgba(245, 158, 11, 0.12)" }}>
+              Stale Frame
+            </span>
+          )}
+        </div>
+
+        <div className="overflow-hidden rounded-xl border border-border bg-black/70">
+          <div className="aspect-video">
+            {monitor.imageDataUrl ? (
+              <img
+                src={monitor.imageDataUrl}
+                alt="OBS live program monitor"
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">
+                {!s.connected
+                  ? "Connect OBS to load the live program monitor."
+                  : monitor.error
+                    ? "Program monitor unavailable for this scene."
+                    : "Loading live program monitor..."}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {monitor.error && (
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            {monitor.imageDataUrl
+              ? "Monitor refresh failed. Showing the last good frame."
+              : monitor.error}
+          </p>
+        )}
+      </div>
 
       {/* Live status row */}
       <div className="mt-4 grid grid-cols-3 gap-2">
