@@ -122,8 +122,9 @@ function buildFingerprint(
     }
   }
 
-  const average = cells.reduce((sum, value) => sum + value, 0) / cells.length;
-  return cells.map((value) => (value >= average ? "1" : "0")).join("");
+  return cells
+    .map((value) => Math.round(value).toString(16).padStart(2, "0"))
+    .join("");
 }
 
 export function analyzeSceneGuardPixels({
