@@ -88,6 +88,17 @@ test("isSceneGuardFresh rejects stale guard data", () => {
   assert.equal(isSceneGuardFresh(stale, 11_001), false);
 });
 
+test("isSceneGuardFresh treats lastCheckedAt 0 as a valid timestamp", () => {
+  const fresh = {
+    ...createDefaultSceneGuardState(),
+    status: "healthy" as const,
+    lastCheckedAt: 0,
+  };
+
+  assert.equal(isSceneGuardFresh(fresh, 1), true);
+  assert.equal(isSceneGuardFresh(fresh, 10_001), false);
+});
+
 test("formatSceneGuardReason returns operator-facing labels", () => {
   assert.equal(formatSceneGuardReason("fullBlack"), "Full black");
   assert.equal(formatSceneGuardReason("frozen"), "Frozen");

@@ -55,7 +55,7 @@ export function isSceneGuardFresh(
   sceneGuard: SceneGuardState | undefined,
   now: number,
 ) {
-  if (!sceneGuard?.lastCheckedAt) {
+  if (sceneGuard?.lastCheckedAt == null) {
     return false;
   }
 
