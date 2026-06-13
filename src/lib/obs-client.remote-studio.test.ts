@@ -236,7 +236,16 @@ test("program scene changes trigger an immediate monitor refresh", async () => {
   fakeObs.trigger("CurrentProgramSceneChanged", { sceneName: "Scene B" });
   await flushAsyncWork();
 
-  assert.deepEqual(fakeObs.calls.at(-1), {
+  assert.deepEqual(
+    [...fakeObs.calls]
+      .reverse()
+      .find(
+        (call) =>
+          call.method === "GetSourceScreenshot" &&
+          call.args?.sourceName === "Scene B" &&
+          call.args?.imageWidth === 960,
+      ),
+    {
     method: "GetSourceScreenshot",
     args: {
       sourceName: "Scene B",
@@ -244,7 +253,8 @@ test("program scene changes trigger an immediate monitor refresh", async () => {
       imageWidth: 960,
       imageCompressionQuality: 75,
     },
-  });
+    },
+  );
   assert.equal(client.state.currentScene, "Scene B");
 
   await client.disconnect();

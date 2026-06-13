@@ -1,4 +1,18 @@
 import OBSWebSocket from "obs-websocket-js";
+import type {
+  SceneGuardMetrics,
+  SceneGuardReason,
+  SceneGuardState,
+} from "./obs-scene-guard.ts";
+import {
+  SCENE_GUARD_ANALYSIS_FORMAT,
+  SCENE_GUARD_ANALYSIS_QUALITY,
+  SCENE_GUARD_ANALYSIS_WIDTH,
+  classifySceneGuardSample,
+  createDefaultSceneGuardState,
+  isSceneGuardFresh,
+} from "./obs-scene-guard.ts";
+import { analyzeSceneGuardImageDataUrl } from "./obs-scene-guard.browser.ts";
 
 export type ObsConfig = {
   url: string;
@@ -12,6 +26,12 @@ export type ObsProgramMonitorState = {
   lastUpdatedAt: number | null;
 };
 
+export type PendingProgramSwitch = {
+  sceneName: string;
+  reasons: SceneGuardReason[];
+  requestedFrom: "directCut" | "transition";
+};
+
 export type ObsState = {
   connected: boolean;
   currentScene: string | null;
@@ -19,11 +39,18 @@ export type ObsState = {
   remoteStudioMode: boolean;
   remotePreviewScene: string | null;
   programMonitor: ObsProgramMonitorState;
+  sceneGuard: Record<string, SceneGuardState>;
+  pendingProgramSwitch: PendingProgramSwitch | null;
   streaming: boolean;
   recording: boolean;
   recordPaused: boolean;
   virtualCam: boolean;
   error?: string;
+};
+
+type ObsClientDeps = {
+  analyzeSceneGuardImageDataUrl?: (imageDataUrl: string) => Promise<SceneGuardMetrics>;
+  now?: () => number;
 };
 
 const PROGRAM_MONITOR_WIDTH = 960;
@@ -46,6 +73,8 @@ function createDefaultObsState(): ObsState {
     remoteStudioMode: false,
     remotePreviewScene: null,
     programMonitor: createDefaultProgramMonitorState(),
+    sceneGuard: {},
+    pendingProgramSwitch: null,
     streaming: false,
     recording: false,
     recordPaused: false,
@@ -68,7 +97,19 @@ export class ObsClient {
   private listeners = new Set<(s: ObsState) => void>();
   private programMonitorTimer: ReturnType<typeof setInterval> | null = null;
   private monitorRefreshInFlight: Promise<void> | null = null;
+  private sceneGuardTimer: ReturnType<typeof setTimeout> | null = null;
+  private sceneGuardPassInFlight: Promise<void> | null = null;
+  private sceneGuardWatchdogEnabled = false;
+  private nextSceneGuardIndex = 0;
+  private readonly analyzeSceneGuardImageDataUrl;
+  private readonly now;
   state: ObsState = createDefaultObsState();
+
+  constructor(deps: ObsClientDeps = {}) {
+    this.analyzeSceneGuardImageDataUrl =
+      deps.analyzeSceneGuardImageDataUrl ?? analyzeSceneGuardImageDataUrl;
+    this.now = deps.now ?? Date.now;
+  }
 
   subscribe(fn: (s: ObsState) => void) {
     this.listeners.add(fn);
@@ -90,9 +131,47 @@ export class ObsClient {
     });
   }
 
+  private setNextSceneGuardIndex(
+    sceneNames: string[],
+    prioritySceneName: string | null,
+  ) {
+    if (sceneNames.length === 0) {
+      this.nextSceneGuardIndex = 0;
+      return;
+    }
+
+    const priorityIndex =
+      prioritySceneName == null ? -1 : sceneNames.indexOf(prioritySceneName);
+
+    this.nextSceneGuardIndex =
+      priorityIndex >= 0
+        ? priorityIndex
+        : Math.min(this.nextSceneGuardIndex, sceneNames.length - 1);
+  }
+
+  private reconcileSceneGuard(
+    sceneNames: string[],
+    prioritySceneName: string | null = this.state.currentScene,
+  ) {
+    const nextSceneGuard: Record<string, SceneGuardState> = {};
+
+    for (const sceneName of sceneNames) {
+      nextSceneGuard[sceneName] =
+        this.state.sceneGuard[sceneName] ?? createDefaultSceneGuardState();
+    }
+
+    this.setNextSceneGuardIndex(sceneNames, prioritySceneName);
+
+    this.update({
+      scenes: sceneNames,
+      sceneGuard: nextSceneGuard,
+    });
+  }
+
   async connect(config: ObsConfig) {
     try {
       this.stopProgramMonitorPolling();
+      this.stopSceneGuardWatchdog();
       await this.obs.disconnect().catch(() => {});
       await this.obs.connect(config.url, config.password || undefined);
       this.bindEvents();
@@ -100,13 +179,20 @@ export class ObsClient {
       this.update({ connected: true, error: undefined });
       await this.refreshProgramMonitor();
       this.startProgramMonitorPolling();
+      this.sceneGuardWatchdogEnabled = true;
+      this.scheduleSceneGuardPass();
     } catch (e: any) {
       this.stopProgramMonitorPolling();
+      this.stopSceneGuardWatchdog();
       this.monitorRefreshInFlight = null;
+      this.sceneGuardPassInFlight = null;
+      this.sceneGuardWatchdogEnabled = false;
       this.update({
         connected: false,
         error: e?.message ?? "Failed to connect",
         programMonitor: createDefaultProgramMonitorState(),
+        sceneGuard: {},
+        pendingProgramSwitch: null,
       });
       throw e;
     }
@@ -114,7 +200,10 @@ export class ObsClient {
 
   async disconnect() {
     this.stopProgramMonitorPolling();
+    this.stopSceneGuardWatchdog();
     this.monitorRefreshInFlight = null;
+    this.sceneGuardPassInFlight = null;
+    this.sceneGuardWatchdogEnabled = false;
     await this.obs.disconnect().catch(() => {});
     this.update(createDefaultObsState());
   }
@@ -128,10 +217,15 @@ export class ObsClient {
     this.obs.off("VirtualcamStateChanged" as any);
     this.obs.on("ConnectionClosed", () => {
       this.stopProgramMonitorPolling();
+      this.stopSceneGuardWatchdog();
       this.monitorRefreshInFlight = null;
+      this.sceneGuardPassInFlight = null;
+      this.sceneGuardWatchdogEnabled = false;
       this.update({
         connected: false,
         programMonitor: createDefaultProgramMonitorState(),
+        sceneGuard: {},
+        pendingProgramSwitch: null,
       });
     });
     this.obs.on("CurrentProgramSceneChanged", (d: any) => {
@@ -141,11 +235,17 @@ export class ObsClient {
           ? this.state.remotePreviewScene
           : d.sceneName,
       });
+      this.setNextSceneGuardIndex(this.state.scenes, d.sceneName);
+      this.scheduleSceneGuardPass();
       void this.refreshProgramMonitor();
     });
-    this.obs.on("SceneListChanged", (d: any) =>
-      this.update({ scenes: d.scenes.map((s: any) => s.sceneName).reverse() })
-    );
+    this.obs.on("SceneListChanged", (d: any) => {
+      this.reconcileSceneGuard(
+        d.scenes.map((s: any) => s.sceneName).reverse(),
+        this.state.currentScene,
+      );
+      this.scheduleSceneGuardPass();
+    });
     this.obs.on("StreamStateChanged", (d: any) =>
       this.update({ streaming: d.outputActive })
     );
@@ -165,6 +265,7 @@ export class ObsClient {
     this.programMonitorTimer = setInterval(() => {
       void this.refreshProgramMonitor();
     }, PROGRAM_MONITOR_INTERVAL_MS);
+    this.programMonitorTimer.unref?.();
   }
 
   private stopProgramMonitorPolling() {
@@ -174,6 +275,32 @@ export class ObsClient {
 
     clearInterval(this.programMonitorTimer);
     this.programMonitorTimer = null;
+  }
+
+  private scheduleSceneGuardPass() {
+    if (
+      this.sceneGuardTimer ||
+      !this.sceneGuardWatchdogEnabled ||
+      !this.state.connected ||
+      this.state.scenes.length === 0
+    ) {
+      return;
+    }
+
+    this.sceneGuardTimer = setTimeout(() => {
+      this.sceneGuardTimer = null;
+      void this.runSceneGuardPass();
+    }, 0);
+    this.sceneGuardTimer.unref?.();
+  }
+
+  private stopSceneGuardWatchdog() {
+    if (!this.sceneGuardTimer) {
+      return;
+    }
+
+    clearTimeout(this.sceneGuardTimer);
+    this.sceneGuardTimer = null;
   }
 
   private async refreshProgramMonitor() {
@@ -219,6 +346,105 @@ export class ObsClient {
     return this.monitorRefreshInFlight;
   }
 
+  private async runSceneGuardPass() {
+    if (!this.state.connected || this.state.scenes.length === 0) {
+      return;
+    }
+
+    if (this.sceneGuardPassInFlight) {
+      return this.sceneGuardPassInFlight;
+    }
+
+    const sceneName = this.state.scenes[this.nextSceneGuardIndex];
+
+    this.sceneGuardPassInFlight = (async () => {
+      try {
+        const screenshot: any = await this.obs.call("GetSourceScreenshot", {
+          sourceName: sceneName,
+          imageFormat: SCENE_GUARD_ANALYSIS_FORMAT,
+          imageWidth: SCENE_GUARD_ANALYSIS_WIDTH,
+          imageCompressionQuality: SCENE_GUARD_ANALYSIS_QUALITY,
+        });
+
+        const imageDataUrl = toScreenshotDataUrl(
+          screenshot.imageData,
+          SCENE_GUARD_ANALYSIS_FORMAT,
+        );
+        const metrics = await this.analyzeSceneGuardImageDataUrl(imageDataUrl);
+        const previous =
+          this.state.sceneGuard[sceneName] ?? createDefaultSceneGuardState();
+
+        this.update({
+          sceneGuard: {
+            ...this.state.sceneGuard,
+            [sceneName]: classifySceneGuardSample(previous, metrics, this.now()),
+          },
+        });
+      } catch {
+        this.update({
+          sceneGuard: {
+            ...this.state.sceneGuard,
+            [sceneName]: createDefaultSceneGuardState(),
+          },
+        });
+      } finally {
+        this.sceneGuardPassInFlight = null;
+        this.nextSceneGuardIndex =
+          this.state.scenes.length === 0
+            ? 0
+            : (this.nextSceneGuardIndex + 1) % this.state.scenes.length;
+        if (this.sceneGuardWatchdogEnabled) {
+          this.scheduleSceneGuardPass();
+        }
+      }
+    })();
+
+    return this.sceneGuardPassInFlight;
+  }
+
+  private getFreshSceneGuard(sceneName: string) {
+    const sceneGuard = this.state.sceneGuard[sceneName];
+
+    if (!isSceneGuardFresh(sceneGuard, this.now())) {
+      return null;
+    }
+
+    return sceneGuard;
+  }
+
+  private async sendProgramScene(
+    sceneName: string,
+    requestedFrom: PendingProgramSwitch["requestedFrom"],
+  ) {
+    await this.obs.call("SetCurrentProgramScene", { sceneName });
+
+    if (requestedFrom === "transition") {
+      this.update({ currentScene: sceneName });
+      this.setNextSceneGuardIndex(this.state.scenes, sceneName);
+      await this.refreshProgramMonitor();
+    }
+  }
+
+  private async requestProgramScene(
+    sceneName: string,
+    requestedFrom: PendingProgramSwitch["requestedFrom"],
+  ) {
+    const sceneGuard = this.getFreshSceneGuard(sceneName);
+
+    if (sceneGuard?.status === "flagged" && sceneGuard.reasons.length > 0) {
+      this.update({
+        pendingProgramSwitch: {
+          sceneName,
+          reasons: sceneGuard.reasons,
+          requestedFrom,
+        },
+      });
+      return;
+    }
+
+    await this.sendProgramScene(sceneName, requestedFrom);
+  }
+
   async refreshAll() {
     const sceneList: any = await this.obs.call("GetSceneList");
     const stream: any = await this.obs.call("GetStreamStatus");
@@ -228,8 +454,9 @@ export class ObsClient {
       const v: any = await this.obs.call("GetVirtualCamStatus");
       vcam = v.outputActive;
     } catch {}
+    const scenes = sceneList.scenes.map((s: any) => s.sceneName).reverse();
+    this.reconcileSceneGuard(scenes, sceneList.currentProgramSceneName);
     this.update({
-      scenes: sceneList.scenes.map((s: any) => s.sceneName).reverse(),
       currentScene: sceneList.currentProgramSceneName,
       remotePreviewScene:
         this.state.remoteStudioMode && this.state.remotePreviewScene
@@ -248,10 +475,10 @@ export class ObsClient {
       return;
     }
 
-    await this.obs.call("SetCurrentProgramScene", { sceneName: name });
+    await this.requestProgramScene(name, "directCut");
   }
   setProgramScene(name: string) {
-    return this.obs.call("SetCurrentProgramScene", { sceneName: name });
+    return this.requestProgramScene(name, "directCut");
   }
   async triggerTransition() {
     const sceneName = this.state.remotePreviewScene;
@@ -259,9 +486,7 @@ export class ObsClient {
       return;
     }
 
-    await this.obs.call("SetCurrentProgramScene", { sceneName });
-    this.update({ currentScene: sceneName });
-    await this.refreshProgramMonitor();
+    await this.requestProgramScene(sceneName, "transition");
   }
   toggleRemoteStudio() {
     const next = !this.state.remoteStudioMode;
@@ -286,6 +511,23 @@ export class ObsClient {
   }
   toggleVirtualCam() {
     return this.obs.call("ToggleVirtualCam");
+  }
+  async confirmPendingProgramSwitch() {
+    const pending = this.state.pendingProgramSwitch;
+    if (!pending) {
+      return;
+    }
+
+    if (!this.state.scenes.includes(pending.sceneName)) {
+      this.update({ pendingProgramSwitch: null });
+      return;
+    }
+
+    this.update({ pendingProgramSwitch: null });
+    await this.sendProgramScene(pending.sceneName, pending.requestedFrom);
+  }
+  cancelPendingProgramSwitch() {
+    this.update({ pendingProgramSwitch: null });
   }
 }
 
