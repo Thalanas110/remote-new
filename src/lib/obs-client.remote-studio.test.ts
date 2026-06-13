@@ -80,10 +80,13 @@ function createClient() {
       if (method === "GetSourceScreenshot") {
         const sceneName = String(args?.sourceName ?? "");
         const response = this.screenshotResponses.get(sceneName);
+        if (response == null) {
+          throw new Error(`No fake screenshot response for ${sceneName}`);
+        }
         if (response instanceof Error) {
           throw response;
         }
-        return response ?? { imageData: "ZmFsbGJhY2s=" };
+        return response;
       }
 
       const response = this.responses.get(method);
@@ -228,7 +231,7 @@ test("program scene changes trigger an immediate monitor refresh", async () => {
   const { client, fakeObs } = createClient();
 
   await client.connect({ url: "ws://127.0.0.1:4455" });
-  fakeObs.responses.set("GetSourceScreenshot", { imageData: "bmV4dC1mcmFtZQ==" });
+  fakeObs.screenshotResponses.set("Scene B", { imageData: "bmV4dC1mcmFtZQ==" });
 
   fakeObs.trigger("CurrentProgramSceneChanged", { sceneName: "Scene B" });
   await flushAsyncWork();
@@ -325,7 +328,7 @@ test("a scene guard pass marks a full-black scene as flagged", async () => {
 });
 
 test("three unchanged passes flag a scene as frozen", async () => {
-  const { client, fakeObs } = createClient();
+  const { client, fakeObs, advanceTime } = createClient();
 
   fakeObs.responses.set("GetSceneList", {
     scenes: [{ sceneName: "Scene A" }],
@@ -334,7 +337,9 @@ test("three unchanged passes flag a scene as frozen", async () => {
 
   await client.refreshAll();
   await (client as any).runSceneGuardPass();
+  advanceTime(1_000);
   await (client as any).runSceneGuardPass();
+  advanceTime(1_000);
   await (client as any).runSceneGuardPass();
 
   assert.deepEqual(client.state.sceneGuard["Scene A"]?.reasons, ["frozen"]);
