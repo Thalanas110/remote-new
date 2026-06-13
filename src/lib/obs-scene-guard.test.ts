@@ -30,6 +30,9 @@ test("analyzeSceneGuardPixels reports a full-black frame", () => {
     height: 8,
   });
 
+  assert.equal(metrics.averageLuma, 0);
+  assert.equal(metrics.blackPixelRatio, 1);
+
   const next = classifySceneGuardSample(
     createDefaultSceneGuardState(),
     metrics,
@@ -81,8 +84,8 @@ test("isSceneGuardFresh rejects stale guard data", () => {
     lastCheckedAt: 1_000,
   };
 
-  assert.equal(isSceneGuardFresh(stale, 20_000), false);
-  assert.equal(isSceneGuardFresh(stale, 5_000), true);
+  assert.equal(isSceneGuardFresh(stale, 11_000), true);
+  assert.equal(isSceneGuardFresh(stale, 11_001), false);
 });
 
 test("formatSceneGuardReason returns operator-facing labels", () => {
