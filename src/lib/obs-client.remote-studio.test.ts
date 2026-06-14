@@ -30,8 +30,11 @@ function createClient() {
       {
         averageLuma: 80,
         blackPixelRatio: 0.04,
+        averageSaturation: 0.2,
+        centerBrightRatio: 0.25,
         fingerprint: "0101010101010101",
         transmitterScore: 0.05,
+        rainbowBarScore: 0,
       },
     ],
     [
@@ -39,8 +42,11 @@ function createClient() {
       {
         averageLuma: 80,
         blackPixelRatio: 0.04,
+        averageSaturation: 0.2,
+        centerBrightRatio: 0.25,
         fingerprint: "1111000011110000",
         transmitterScore: 0.05,
+        rainbowBarScore: 0,
       },
     ],
   ]);
@@ -113,6 +119,7 @@ function createClient() {
     connected: true,
     currentScene: "Scene A",
     scenes: ["Scene A", "Scene B"],
+    sceneGuardEnabled: true,
     streaming: false,
     recording: false,
     recordPaused: false,
@@ -321,8 +328,11 @@ test("a scene guard pass marks a full-black scene as flagged", async () => {
   analysisByImage.set("data:image/jpeg;base64,c2NlbmUtYQ==", {
     averageLuma: 0,
     blackPixelRatio: 1,
+    averageSaturation: 0,
+    centerBrightRatio: 0,
     fingerprint: "0000000000000000",
     transmitterScore: 0.02,
+    rainbowBarScore: 0,
   });
 
   await client.refreshAll();
@@ -378,6 +388,28 @@ test("setScene stores a pending confirmation instead of hard-cutting a flagged s
     reasons: ["frozen"],
     requestedFrom: "directCut",
   });
+});
+
+test("disabled scene guard allows a flagged scene to switch immediately", async () => {
+  const { client, fakeObs, advanceTime } = createClient();
+
+  client.toggleSceneGuard();
+  client.state.sceneGuard["Scene B"] = {
+    status: "flagged",
+    reasons: ["frozen"],
+    lastCheckedAt: 1_000,
+    lastFingerprint: "1111000011110000",
+    unchangedCount: 3,
+  };
+  advanceTime(1_000);
+
+  await client.setScene("Scene B");
+
+  assert.deepEqual(fakeObs.calls.at(-1), {
+    method: "SetCurrentProgramScene",
+    args: { sceneName: "Scene B" },
+  });
+  assert.equal(client.state.pendingProgramSwitch, null);
 });
 
 test("confirmPendingProgramSwitch sends the deferred OBS switch", async () => {

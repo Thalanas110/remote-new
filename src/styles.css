@@ -64,21 +64,37 @@
   --ring: oklch(0.78 0.18 75);
 
   /* App-specific */
-  --obs: oklch(0.72 0.16 200);       /* OBS cyan */
-  --pp: oklch(0.74 0.18 320);        /* ProPresenter magenta */
-  --live: oklch(0.68 0.24 25);       /* on-air red */
+  --obs: oklch(0.72 0.16 200); /* OBS cyan */
+  --pp: oklch(0.74 0.18 320); /* ProPresenter magenta */
+  --live: oklch(0.68 0.24 25); /* on-air red */
   --rec: oklch(0.7 0.22 15);
 }
 
-.dark { color-scheme: dark; }
+.dark {
+  color-scheme: dark;
+}
 
 @layer base {
-  * { border-color: var(--color-border); }
-  html, body { height: 100%; }
+  * {
+    border-color: var(--color-border);
+  }
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
   body {
     background:
-      radial-gradient(1200px 600px at 0% -10%, color-mix(in oklab, var(--obs) 15%, transparent), transparent 60%),
-      radial-gradient(1000px 500px at 100% 0%, color-mix(in oklab, var(--pp) 12%, transparent), transparent 60%),
+      radial-gradient(
+        1200px 600px at 0% -10%,
+        color-mix(in oklab, var(--obs) 15%, transparent),
+        transparent 60%
+      ),
+      radial-gradient(
+        1000px 500px at 100% 0%,
+        color-mix(in oklab, var(--pp) 12%, transparent),
+        transparent 60%
+      ),
       var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-display);
@@ -96,8 +112,15 @@
   .pill {
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider;
   }
-  .dot { @apply inline-block h-1.5 w-1.5 rounded-full; }
-  .btn-tap { @apply active:scale-[0.97] transition-transform; }
-  .live-glow { box-shadow: 0 0 0 1px color-mix(in oklab, var(--live) 60%, transparent),
-                          0 0 28px -2px color-mix(in oklab, var(--live) 55%, transparent); }
+  .dot {
+    @apply inline-block h-1.5 w-1.5 rounded-full;
+  }
+  .btn-tap {
+    @apply active:scale-[0.97] transition-transform;
+  }
+  .live-glow {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--live) 60%, transparent),
+      0 0 28px -2px color-mix(in oklab, var(--live) 55%, transparent);
+  }
 }

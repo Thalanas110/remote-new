@@ -36,6 +36,7 @@ export type ObsState = {
   connected: boolean;
   currentScene: string | null;
   scenes: string[];
+  sceneGuardEnabled: boolean;
   remoteStudioMode: boolean;
   remotePreviewScene: string | null;
   programMonitor: ObsProgramMonitorState;
@@ -70,6 +71,7 @@ function createDefaultObsState(): ObsState {
     connected: false,
     currentScene: null,
     scenes: [],
+    sceneGuardEnabled: true,
     remoteStudioMode: false,
     remotePreviewScene: null,
     programMonitor: createDefaultProgramMonitorState(),
@@ -429,6 +431,11 @@ export class ObsClient {
     sceneName: string,
     requestedFrom: PendingProgramSwitch["requestedFrom"],
   ) {
+    if (!this.state.sceneGuardEnabled) {
+      await this.sendProgramScene(sceneName, requestedFrom);
+      return;
+    }
+
     const sceneGuard = this.getFreshSceneGuard(sceneName);
 
     if (sceneGuard?.status === "flagged" && sceneGuard.reasons.length > 0) {
@@ -499,6 +506,13 @@ export class ObsClient {
   }
   toggleStudio() {
     this.toggleRemoteStudio();
+  }
+  toggleSceneGuard() {
+    const next = !this.state.sceneGuardEnabled;
+    this.update({
+      sceneGuardEnabled: next,
+      pendingProgramSwitch: next ? this.state.pendingProgramSwitch : null,
+    });
   }
   toggleStream() {
     return this.obs.call("ToggleStream");
