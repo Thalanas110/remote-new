@@ -1,18 +1,23 @@
-import OBSWebSocket from "obs-websocket-js";
-import type {
-  SceneGuardMetrics,
-  SceneGuardReason,
-  SceneGuardState,
-} from "./obs-scene-guard.ts";
+import OBSWebSocket, { EventSubscription, RequestBatchExecutionType } from "obs-websocket-js";
+import type { SceneGuardMetrics, SceneGuardReason, SceneGuardState } from "./obs-scene-guard.ts";
 import {
   SCENE_GUARD_ANALYSIS_FORMAT,
   SCENE_GUARD_ANALYSIS_QUALITY,
   SCENE_GUARD_ANALYSIS_WIDTH,
-  classifySceneGuardSample,
+  classifySceneImageSample,
+  composeSceneGuardState,
   createDefaultSceneGuardState,
-  isSceneGuardFresh,
+  createDefaultSceneImageGuardState,
+  createDefaultSourceHealthGuardState,
+  isSceneImageFresh,
 } from "./obs-scene-guard.ts";
 import { analyzeSceneGuardImageDataUrl } from "./obs-scene-guard.browser.ts";
+import {
+  applySourceHealthProbe,
+  isSourceHealthFresh,
+  pickPrimarySceneSource,
+  type ScenePrimarySource,
+} from "./obs-source-health.ts";
 
 export type ObsConfig = {
   url: string;
@@ -54,8 +59,99 @@ type ObsClientDeps = {
   now?: () => number;
 };
 
+type ObsInputCatalogEntry = {
+  inputKind: string;
+  unversionedInputKind: string | null;
+};
+
+type ObsSourceTelemetry = {
+  videoActive: boolean | null;
+  videoShowing: boolean | null;
+  updatedAt: number | null;
+};
+
+type ObsSceneListResponse = {
+  scenes: Array<{ sceneName: string }>;
+  currentProgramSceneName: string | null;
+};
+
+type ObsInputListResponse = {
+  inputs: Array<{
+    inputName: string;
+    inputKind: string;
+    unversionedInputKind?: string | null;
+  }>;
+};
+
+type ObsSceneItemListResponse = {
+  sceneItems: Array<{
+    sceneItemId?: number;
+    sourceName?: string;
+    sceneItemEnabled?: boolean;
+  }>;
+};
+
+type ObsOutputStateResponse = {
+  outputActive: boolean;
+  outputPaused?: boolean;
+  outputState?: string;
+};
+
+type ObsSourceScreenshotResponse = {
+  imageData: string;
+};
+
+type ObsSourceActiveResponse = {
+  videoActive?: boolean;
+  videoShowing?: boolean;
+};
+
+type ObsStatsResponse = {
+  averageFrameRenderTime?: number;
+  renderSkippedFrames?: number;
+};
+
+type ObsCurrentProgramSceneChangedEvent = {
+  sceneName: string;
+};
+
+type ObsSceneListChangedEvent = {
+  scenes: Array<{ sceneName: string }>;
+};
+
+type ObsInputActiveStateChangedEvent = {
+  inputName: string;
+  videoActive: boolean;
+};
+
+type ObsInputShowStateChangedEvent = {
+  inputName: string;
+  videoShowing: boolean;
+};
+
+type ObsBatchResponse<T = unknown> = {
+  requestStatus: {
+    result: boolean;
+  };
+  responseData: T;
+};
+
+const OBS_CLIENT_EVENTS = [
+  "ConnectionClosed",
+  "CurrentProgramSceneChanged",
+  "SceneListChanged",
+  "InputActiveStateChanged",
+  "InputShowStateChanged",
+  "StreamStateChanged",
+  "RecordStateChanged",
+  "VirtualcamStateChanged",
+] as const;
+
 const PROGRAM_MONITOR_WIDTH = 960;
 const PROGRAM_MONITOR_INTERVAL_MS = 1500;
+const SOURCE_HEALTH_PROBE_WIDTH = 32;
+const SOURCE_HEALTH_PROBE_QUALITY = 20;
+const SOURCE_HEALTH_LOOP_DELAY_MS = 25;
 
 function createDefaultProgramMonitorState(): ObsProgramMonitorState {
   return {
@@ -92,6 +188,10 @@ function toScreenshotDataUrl(imageData: string, format: string) {
   return `data:image/${format};base64,${imageData}`;
 }
 
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
 export const defaultObsState: ObsState = createDefaultObsState();
 
 export class ObsClient {
@@ -99,10 +199,16 @@ export class ObsClient {
   private listeners = new Set<(s: ObsState) => void>();
   private programMonitorTimer: ReturnType<typeof setInterval> | null = null;
   private monitorRefreshInFlight: Promise<void> | null = null;
-  private sceneGuardTimer: ReturnType<typeof setTimeout> | null = null;
-  private sceneGuardPassInFlight: Promise<void> | null = null;
-  private sceneGuardWatchdogEnabled = false;
-  private nextSceneGuardIndex = 0;
+  private sceneImageTimer: ReturnType<typeof setTimeout> | null = null;
+  private sceneImagePassInFlight: Promise<void> | null = null;
+  private sourceHealthTimer: ReturnType<typeof setTimeout> | null = null;
+  private sourceHealthPassInFlight: Promise<void> | null = null;
+  private guardLoopsEnabled = false;
+  private nextSceneImageIndex = 0;
+  private nextSourceHealthIndex = 0;
+  private inputCatalog: Record<string, ObsInputCatalogEntry> = {};
+  private scenePrimarySources: Record<string, ScenePrimarySource> = {};
+  private sourceTelemetry: Record<string, ObsSourceTelemetry> = {};
   private readonly analyzeSceneGuardImageDataUrl;
   private readonly now;
   state: ObsState = createDefaultObsState();
@@ -121,7 +227,7 @@ export class ObsClient {
 
   private update(patch: Partial<ObsState>) {
     this.state = { ...this.state, ...patch };
-    this.listeners.forEach((l) => l(this.state));
+    this.listeners.forEach((listener) => listener(this.state));
   }
 
   private updateProgramMonitor(patch: Partial<ObsProgramMonitorState>) {
@@ -133,22 +239,21 @@ export class ObsClient {
     });
   }
 
-  private setNextSceneGuardIndex(
-    sceneNames: string[],
-    prioritySceneName: string | null,
-  ) {
+  private setNextSceneIndices(sceneNames: string[], prioritySceneName: string | null) {
     if (sceneNames.length === 0) {
-      this.nextSceneGuardIndex = 0;
+      this.nextSceneImageIndex = 0;
+      this.nextSourceHealthIndex = 0;
       return;
     }
 
-    const priorityIndex =
-      prioritySceneName == null ? -1 : sceneNames.indexOf(prioritySceneName);
-
-    this.nextSceneGuardIndex =
+    const priorityIndex = prioritySceneName == null ? -1 : sceneNames.indexOf(prioritySceneName);
+    const nextIndex =
       priorityIndex >= 0
         ? priorityIndex
-        : Math.min(this.nextSceneGuardIndex, sceneNames.length - 1);
+        : Math.min(this.nextSceneImageIndex, sceneNames.length - 1);
+
+    this.nextSceneImageIndex = nextIndex;
+    this.nextSourceHealthIndex = nextIndex;
   }
 
   private reconcileSceneGuard(
@@ -156,13 +261,18 @@ export class ObsClient {
     prioritySceneName: string | null = this.state.currentScene,
   ) {
     const nextSceneGuard: Record<string, SceneGuardState> = {};
+    const nextPrimarySources: Record<string, ScenePrimarySource> = {};
 
     for (const sceneName of sceneNames) {
       nextSceneGuard[sceneName] =
         this.state.sceneGuard[sceneName] ?? createDefaultSceneGuardState();
+      if (this.scenePrimarySources[sceneName]) {
+        nextPrimarySources[sceneName] = this.scenePrimarySources[sceneName];
+      }
     }
 
-    this.setNextSceneGuardIndex(sceneNames, prioritySceneName);
+    this.scenePrimarySources = nextPrimarySources;
+    this.setNextSceneIndices(sceneNames, prioritySceneName);
 
     this.update({
       scenes: sceneNames,
@@ -170,59 +280,114 @@ export class ObsClient {
     });
   }
 
+  private async refreshInputCatalog() {
+    const { inputs } = (await this.obs.call("GetInputList")) as ObsInputListResponse;
+    this.inputCatalog = Object.fromEntries(
+      inputs.map((input) => [
+        String(input.inputName),
+        {
+          inputKind: String(input.inputKind),
+          unversionedInputKind:
+            input.unversionedInputKind == null ? null : String(input.unversionedInputKind),
+        },
+      ]),
+    );
+  }
+
+  private updateSourceTelemetry(sourceName: string, patch: Partial<ObsSourceTelemetry>) {
+    this.sourceTelemetry[sourceName] = {
+      videoActive: this.sourceTelemetry[sourceName]?.videoActive ?? null,
+      videoShowing: this.sourceTelemetry[sourceName]?.videoShowing ?? null,
+      updatedAt: this.sourceTelemetry[sourceName]?.updatedAt ?? null,
+      ...patch,
+    };
+  }
+
+  private async resolvePrimarySource(sceneName: string) {
+    const { sceneItems } = (await this.obs.call("GetSceneItemList", {
+      sceneName,
+    })) as ObsSceneItemListResponse;
+    const primary = pickPrimarySceneSource(sceneItems, this.inputCatalog);
+    this.scenePrimarySources[sceneName] = primary;
+    return primary;
+  }
+
+  private updateSceneGuard(
+    sceneName: string,
+    patch: Partial<Pick<SceneGuardState, "image" | "sourceHealth">>,
+  ) {
+    const previous = this.state.sceneGuard[sceneName] ?? createDefaultSceneGuardState();
+    const image = patch.image ?? previous.image;
+    const sourceHealth = patch.sourceHealth ?? previous.sourceHealth;
+
+    this.update({
+      sceneGuard: {
+        ...this.state.sceneGuard,
+        [sceneName]: composeSceneGuardState({ image, sourceHealth }),
+      },
+    });
+  }
+
   async connect(config: ObsConfig) {
     try {
       this.stopProgramMonitorPolling();
-      this.stopSceneGuardWatchdog();
+      this.stopGuardLoops();
       await this.obs.disconnect().catch(() => {});
-      await this.obs.connect(config.url, config.password || undefined);
+      await this.obs.connect(config.url, config.password || undefined, {
+        eventSubscriptions:
+          EventSubscription.All |
+          EventSubscription.InputActiveStateChanged |
+          EventSubscription.InputShowStateChanged,
+      });
       this.bindEvents();
       await this.refreshAll();
       this.update({ connected: true, error: undefined });
       await this.refreshProgramMonitor();
       this.startProgramMonitorPolling();
-      this.sceneGuardWatchdogEnabled = true;
-      this.scheduleSceneGuardPass();
-    } catch (e: any) {
+      this.guardLoopsEnabled = true;
+      this.scheduleSceneImagePass();
+      this.scheduleSourceHealthPass();
+    } catch (error: unknown) {
       this.stopProgramMonitorPolling();
-      this.stopSceneGuardWatchdog();
+      this.stopGuardLoops();
       this.monitorRefreshInFlight = null;
-      this.sceneGuardPassInFlight = null;
-      this.sceneGuardWatchdogEnabled = false;
+      this.sceneImagePassInFlight = null;
+      this.sourceHealthPassInFlight = null;
+      this.guardLoopsEnabled = false;
       this.update({
         connected: false,
-        error: e?.message ?? "Failed to connect",
+        error: getErrorMessage(error, "Failed to connect"),
         programMonitor: createDefaultProgramMonitorState(),
         sceneGuard: {},
         pendingProgramSwitch: null,
       });
-      throw e;
+      throw error;
     }
   }
 
   async disconnect() {
     this.stopProgramMonitorPolling();
-    this.stopSceneGuardWatchdog();
+    this.stopGuardLoops();
     this.monitorRefreshInFlight = null;
-    this.sceneGuardPassInFlight = null;
-    this.sceneGuardWatchdogEnabled = false;
+    this.sceneImagePassInFlight = null;
+    this.sourceHealthPassInFlight = null;
+    this.guardLoopsEnabled = false;
     await this.obs.disconnect().catch(() => {});
     this.update(createDefaultObsState());
   }
 
   private bindEvents() {
-    this.obs.off("ConnectionClosed" as any);
-    this.obs.off("CurrentProgramSceneChanged" as any);
-    this.obs.off("SceneListChanged" as any);
-    this.obs.off("StreamStateChanged" as any);
-    this.obs.off("RecordStateChanged" as any);
-    this.obs.off("VirtualcamStateChanged" as any);
+    for (const eventName of OBS_CLIENT_EVENTS) {
+      this.obs.off(eventName);
+    }
+
     this.obs.on("ConnectionClosed", () => {
       this.stopProgramMonitorPolling();
-      this.stopSceneGuardWatchdog();
+      this.stopGuardLoops();
       this.monitorRefreshInFlight = null;
-      this.sceneGuardPassInFlight = null;
-      this.sceneGuardWatchdogEnabled = false;
+      this.sceneImagePassInFlight = null;
+      this.sourceHealthPassInFlight = null;
+      this.guardLoopsEnabled = false;
       this.update({
         connected: false,
         programMonitor: createDefaultProgramMonitorState(),
@@ -230,32 +395,55 @@ export class ObsClient {
         pendingProgramSwitch: null,
       });
     });
-    this.obs.on("CurrentProgramSceneChanged", (d: any) => {
+
+    this.obs.on("CurrentProgramSceneChanged", (payload: ObsCurrentProgramSceneChangedEvent) => {
       this.update({
-        currentScene: d.sceneName,
+        currentScene: payload.sceneName,
         remotePreviewScene: this.state.remoteStudioMode
           ? this.state.remotePreviewScene
-          : d.sceneName,
+          : payload.sceneName,
       });
-      this.setNextSceneGuardIndex(this.state.scenes, d.sceneName);
-      this.scheduleSceneGuardPass();
+      this.setNextSceneIndices(this.state.scenes, payload.sceneName);
+      this.scheduleSceneImagePass();
+      this.scheduleSourceHealthPass();
       void this.refreshProgramMonitor();
     });
-    this.obs.on("SceneListChanged", (d: any) => {
+
+    this.obs.on("SceneListChanged", (payload: ObsSceneListChangedEvent) => {
       this.reconcileSceneGuard(
-        d.scenes.map((s: any) => s.sceneName).reverse(),
+        payload.scenes.map((scene) => scene.sceneName).reverse(),
         this.state.currentScene,
       );
-      this.scheduleSceneGuardPass();
+      this.scheduleSceneImagePass();
+      this.scheduleSourceHealthPass();
     });
-    this.obs.on("StreamStateChanged", (d: any) =>
-      this.update({ streaming: d.outputActive })
+
+    this.obs.on("InputActiveStateChanged", (payload: ObsInputActiveStateChangedEvent) => {
+      this.updateSourceTelemetry(String(payload.inputName), {
+        videoActive: Boolean(payload.videoActive),
+        updatedAt: this.now(),
+      });
+    });
+
+    this.obs.on("InputShowStateChanged", (payload: ObsInputShowStateChangedEvent) => {
+      this.updateSourceTelemetry(String(payload.inputName), {
+        videoShowing: Boolean(payload.videoShowing),
+        updatedAt: this.now(),
+      });
+    });
+
+    this.obs.on("StreamStateChanged", (payload: ObsOutputStateResponse) =>
+      this.update({ streaming: payload.outputActive }),
     );
-    this.obs.on("RecordStateChanged", (d: any) =>
-      this.update({ recording: d.outputActive, recordPaused: d.outputState === "OBS_WEBSOCKET_OUTPUT_PAUSED" })
+    this.obs.on("RecordStateChanged", (payload: ObsOutputStateResponse) =>
+      this.update({
+        recording: payload.outputActive,
+        recordPaused:
+          payload.outputState === "OBS_WEBSOCKET_OUTPUT_PAUSED" || payload.outputPaused === true,
+      }),
     );
-    this.obs.on("VirtualcamStateChanged", (d: any) =>
-      this.update({ virtualCam: d.outputActive })
+    this.obs.on("VirtualcamStateChanged", (payload: ObsOutputStateResponse) =>
+      this.update({ virtualCam: payload.outputActive }),
     );
   }
 
@@ -279,30 +467,61 @@ export class ObsClient {
     this.programMonitorTimer = null;
   }
 
-  private scheduleSceneGuardPass() {
+  private stopSceneImageLoop() {
+    if (!this.sceneImageTimer) {
+      return;
+    }
+
+    clearTimeout(this.sceneImageTimer);
+    this.sceneImageTimer = null;
+  }
+
+  private stopSourceHealthLoop() {
+    if (!this.sourceHealthTimer) {
+      return;
+    }
+
+    clearTimeout(this.sourceHealthTimer);
+    this.sourceHealthTimer = null;
+  }
+
+  private stopGuardLoops() {
+    this.stopSceneImageLoop();
+    this.stopSourceHealthLoop();
+  }
+
+  private scheduleSceneImagePass() {
     if (
-      this.sceneGuardTimer ||
-      !this.sceneGuardWatchdogEnabled ||
+      this.sceneImageTimer ||
+      !this.guardLoopsEnabled ||
       !this.state.connected ||
       this.state.scenes.length === 0
     ) {
       return;
     }
 
-    this.sceneGuardTimer = setTimeout(() => {
-      this.sceneGuardTimer = null;
-      void this.runSceneGuardPass();
+    this.sceneImageTimer = setTimeout(() => {
+      this.sceneImageTimer = null;
+      void this.runSceneImagePass();
     }, 0);
-    this.sceneGuardTimer.unref?.();
+    this.sceneImageTimer.unref?.();
   }
 
-  private stopSceneGuardWatchdog() {
-    if (!this.sceneGuardTimer) {
+  private scheduleSourceHealthPass() {
+    if (
+      this.sourceHealthTimer ||
+      !this.guardLoopsEnabled ||
+      !this.state.connected ||
+      this.state.scenes.length === 0
+    ) {
       return;
     }
 
-    clearTimeout(this.sceneGuardTimer);
-    this.sceneGuardTimer = null;
+    this.sourceHealthTimer = setTimeout(() => {
+      this.sourceHealthTimer = null;
+      void this.runSourceHealthPass();
+    }, SOURCE_HEALTH_LOOP_DELAY_MS);
+    this.sourceHealthTimer.unref?.();
   }
 
   private async refreshProgramMonitor() {
@@ -322,12 +541,12 @@ export class ObsClient {
 
     this.monitorRefreshInFlight = (async () => {
       try {
-        const result: any = await this.obs.call("GetSourceScreenshot", {
+        const result = (await this.obs.call("GetSourceScreenshot", {
           sourceName: sceneName,
           imageFormat: "jpeg",
           imageWidth: PROGRAM_MONITOR_WIDTH,
           imageCompressionQuality: 75,
-        });
+        })) as ObsSourceScreenshotResponse;
 
         this.updateProgramMonitor({
           imageDataUrl: toScreenshotDataUrl(result.imageData, "jpeg"),
@@ -335,10 +554,10 @@ export class ObsClient {
           error: undefined,
           lastUpdatedAt: Date.now(),
         });
-      } catch (e: any) {
+      } catch (error: unknown) {
         this.updateProgramMonitor({
           loading: false,
-          error: e?.message ?? "Monitor refresh failed",
+          error: getErrorMessage(error, "Monitor refresh failed"),
         });
       } finally {
         this.monitorRefreshInFlight = null;
@@ -348,70 +567,180 @@ export class ObsClient {
     return this.monitorRefreshInFlight;
   }
 
-  private async runSceneGuardPass() {
+  private async runSceneImagePass() {
     if (!this.state.connected || this.state.scenes.length === 0) {
       return;
     }
 
-    if (this.sceneGuardPassInFlight) {
-      return this.sceneGuardPassInFlight;
+    if (this.sceneImagePassInFlight) {
+      return this.sceneImagePassInFlight;
     }
 
-    const sceneName = this.state.scenes[this.nextSceneGuardIndex];
+    const sceneName = this.state.scenes[this.nextSceneImageIndex];
 
-    this.sceneGuardPassInFlight = (async () => {
+    this.sceneImagePassInFlight = (async () => {
       try {
-        const screenshot: any = await this.obs.call("GetSourceScreenshot", {
+        const screenshot = (await this.obs.call("GetSourceScreenshot", {
           sourceName: sceneName,
           imageFormat: SCENE_GUARD_ANALYSIS_FORMAT,
           imageWidth: SCENE_GUARD_ANALYSIS_WIDTH,
           imageCompressionQuality: SCENE_GUARD_ANALYSIS_QUALITY,
-        });
+        })) as ObsSourceScreenshotResponse;
 
-        const imageDataUrl = toScreenshotDataUrl(
-          screenshot.imageData,
-          SCENE_GUARD_ANALYSIS_FORMAT,
-        );
+        const imageDataUrl = toScreenshotDataUrl(screenshot.imageData, SCENE_GUARD_ANALYSIS_FORMAT);
         const metrics = await this.analyzeSceneGuardImageDataUrl(imageDataUrl);
         const previous =
-          this.state.sceneGuard[sceneName] ?? createDefaultSceneGuardState();
+          this.state.sceneGuard[sceneName]?.image ?? createDefaultSceneImageGuardState();
 
-        this.update({
-          sceneGuard: {
-            ...this.state.sceneGuard,
-            [sceneName]: classifySceneGuardSample(previous, metrics, this.now()),
-          },
+        this.updateSceneGuard(sceneName, {
+          image: classifySceneImageSample(previous, metrics, this.now()),
         });
       } catch {
-        this.update({
-          sceneGuard: {
-            ...this.state.sceneGuard,
-            [sceneName]: createDefaultSceneGuardState(),
-          },
+        this.updateSceneGuard(sceneName, {
+          image: createDefaultSceneImageGuardState(),
         });
       } finally {
-        this.sceneGuardPassInFlight = null;
-        this.nextSceneGuardIndex =
+        this.sceneImagePassInFlight = null;
+        this.nextSceneImageIndex =
           this.state.scenes.length === 0
             ? 0
-            : (this.nextSceneGuardIndex + 1) % this.state.scenes.length;
-        if (this.sceneGuardWatchdogEnabled) {
-          this.scheduleSceneGuardPass();
+            : (this.nextSceneImageIndex + 1) % this.state.scenes.length;
+        if (this.guardLoopsEnabled) {
+          this.scheduleSceneImagePass();
         }
       }
     })();
 
-    return this.sceneGuardPassInFlight;
+    return this.sceneImagePassInFlight;
   }
 
-  private getFreshSceneGuard(sceneName: string) {
-    const sceneGuard = this.state.sceneGuard[sceneName];
+  private async runSourceHealthPass() {
+    if (!this.state.connected || this.state.scenes.length === 0) {
+      return;
+    }
 
-    if (!isSceneGuardFresh(sceneGuard, this.now())) {
+    if (this.sourceHealthPassInFlight) {
+      return this.sourceHealthPassInFlight;
+    }
+
+    const sceneName = this.state.scenes[this.nextSourceHealthIndex];
+
+    this.sourceHealthPassInFlight = (async () => {
+      try {
+        const previous =
+          this.state.sceneGuard[sceneName]?.sourceHealth ?? createDefaultSourceHealthGuardState();
+        const primary =
+          this.scenePrimarySources[sceneName] ?? (await this.resolvePrimarySource(sceneName));
+
+        if (!primary.sourceName || !primary.sourceKind) {
+          this.updateSceneGuard(sceneName, {
+            sourceHealth: {
+              ...createDefaultSourceHealthGuardState(),
+              lastCheckedAt: this.now(),
+            },
+          });
+          return;
+        }
+
+        const startedAt = this.now();
+        const results = (await this.obs.callBatch(
+          [
+            { requestType: "GetStats" },
+            {
+              requestType: "GetSourceActive",
+              requestData: { sourceName: primary.sourceName },
+            },
+            {
+              requestType: "GetSourceScreenshot",
+              requestData: {
+                sourceName: primary.sourceName,
+                imageFormat: "jpeg",
+                imageWidth: SOURCE_HEALTH_PROBE_WIDTH,
+                imageCompressionQuality: SOURCE_HEALTH_PROBE_QUALITY,
+              },
+            },
+            { requestType: "GetStats" },
+          ],
+          {
+            executionType: RequestBatchExecutionType.SerialRealtime,
+            haltOnFailure: false,
+          },
+        )) as [
+          ObsBatchResponse<ObsStatsResponse>,
+          ObsBatchResponse<ObsSourceActiveResponse>,
+          ObsBatchResponse<ObsSourceScreenshotResponse>,
+          ObsBatchResponse<ObsStatsResponse>,
+        ];
+
+        const [beforeStats, active, screenshot, afterStats] = results;
+        const telemetry = this.sourceTelemetry[primary.sourceName] ?? {
+          videoActive: null,
+          videoShowing: null,
+          updatedAt: null,
+        };
+
+        if (active?.requestStatus?.result) {
+          this.updateSourceTelemetry(primary.sourceName, {
+            videoActive: Boolean(active.responseData?.videoActive),
+            videoShowing: Boolean(active.responseData?.videoShowing),
+            updatedAt: this.now(),
+          });
+        }
+
+        this.updateSceneGuard(sceneName, {
+          sourceHealth: applySourceHealthProbe(previous, primary, {
+            checkedAt: this.now(),
+            latencyMs: this.now() - startedAt,
+            probeOk: Boolean(screenshot?.requestStatus?.result),
+            sourceActive: active?.requestStatus?.result
+              ? Boolean(active.responseData?.videoActive)
+              : telemetry.videoActive,
+            sourceShowing: active?.requestStatus?.result
+              ? Boolean(active.responseData?.videoShowing)
+              : telemetry.videoShowing,
+            renderSkippedFramesDelta:
+              beforeStats?.requestStatus?.result && afterStats?.requestStatus?.result
+                ? Number(afterStats.responseData?.renderSkippedFrames) -
+                  Number(beforeStats.responseData?.renderSkippedFrames)
+                : 0,
+            averageFrameRenderTimeMs: afterStats?.requestStatus?.result
+              ? Number(afterStats.responseData?.averageFrameRenderTime)
+              : 0,
+          }),
+        });
+      } finally {
+        this.sourceHealthPassInFlight = null;
+        this.nextSourceHealthIndex =
+          this.state.scenes.length === 0
+            ? 0
+            : (this.nextSourceHealthIndex + 1) % this.state.scenes.length;
+        if (this.guardLoopsEnabled) {
+          this.scheduleSourceHealthPass();
+        }
+      }
+    })();
+
+    return this.sourceHealthPassInFlight;
+  }
+
+  private getEffectiveSceneGuard(sceneName: string) {
+    const sceneGuard = this.state.sceneGuard[sceneName];
+    if (!sceneGuard) {
       return null;
     }
 
-    return sceneGuard;
+    const image = isSceneImageFresh(sceneGuard.image, this.now())
+      ? sceneGuard.image
+      : createDefaultSceneImageGuardState();
+    const sourceHealth = isSourceHealthFresh(sceneGuard.sourceHealth, this.now())
+      ? sceneGuard.sourceHealth
+      : {
+          ...sceneGuard.sourceHealth,
+          status: "unknown" as const,
+          reasons: [],
+        };
+
+    return composeSceneGuardState({ image, sourceHealth });
   }
 
   private async sendProgramScene(
@@ -422,7 +751,7 @@ export class ObsClient {
 
     if (requestedFrom === "transition") {
       this.update({ currentScene: sceneName });
-      this.setNextSceneGuardIndex(this.state.scenes, sceneName);
+      this.setNextSceneIndices(this.state.scenes, sceneName);
       await this.refreshProgramMonitor();
     }
   }
@@ -436,7 +765,7 @@ export class ObsClient {
       return;
     }
 
-    const sceneGuard = this.getFreshSceneGuard(sceneName);
+    const sceneGuard = this.getEffectiveSceneGuard(sceneName);
 
     if (sceneGuard?.status === "flagged" && sceneGuard.reasons.length > 0) {
       this.update({
@@ -453,15 +782,20 @@ export class ObsClient {
   }
 
   async refreshAll() {
-    const sceneList: any = await this.obs.call("GetSceneList");
-    const stream: any = await this.obs.call("GetStreamStatus");
-    const record: any = await this.obs.call("GetRecordStatus");
-    let vcam = false;
+    const sceneList = (await this.obs.call("GetSceneList")) as ObsSceneListResponse;
+    const stream = (await this.obs.call("GetStreamStatus")) as ObsOutputStateResponse;
+    const record = (await this.obs.call("GetRecordStatus")) as ObsOutputStateResponse;
+    let virtualCam = false;
     try {
-      const v: any = await this.obs.call("GetVirtualCamStatus");
-      vcam = v.outputActive;
-    } catch {}
-    const scenes = sceneList.scenes.map((s: any) => s.sceneName).reverse();
+      const status = (await this.obs.call("GetVirtualCamStatus")) as ObsOutputStateResponse;
+      virtualCam = status.outputActive;
+    } catch {
+      virtualCam = false;
+    }
+
+    await this.refreshInputCatalog();
+
+    const scenes = sceneList.scenes.map((scene) => scene.sceneName).reverse();
     this.reconcileSceneGuard(scenes, sceneList.currentProgramSceneName);
     this.update({
       currentScene: sceneList.currentProgramSceneName,
@@ -472,7 +806,7 @@ export class ObsClient {
       streaming: stream.outputActive,
       recording: record.outputActive,
       recordPaused: record.outputPaused,
-      virtualCam: vcam,
+      virtualCam,
     });
   }
 
@@ -484,9 +818,11 @@ export class ObsClient {
 
     await this.requestProgramScene(name, "directCut");
   }
+
   setProgramScene(name: string) {
     return this.requestProgramScene(name, "directCut");
   }
+
   async triggerTransition() {
     const sceneName = this.state.remotePreviewScene;
     if (!sceneName || sceneName === this.state.currentScene) {
@@ -495,18 +831,21 @@ export class ObsClient {
 
     await this.requestProgramScene(sceneName, "transition");
   }
+
   toggleRemoteStudio() {
     const next = !this.state.remoteStudioMode;
     this.update({
       remoteStudioMode: next,
       remotePreviewScene: next
-        ? this.state.remotePreviewScene ?? this.state.currentScene
+        ? (this.state.remotePreviewScene ?? this.state.currentScene)
         : this.state.currentScene,
     });
   }
+
   toggleStudio() {
     this.toggleRemoteStudio();
   }
+
   toggleSceneGuard() {
     const next = !this.state.sceneGuardEnabled;
     this.update({
@@ -514,18 +853,23 @@ export class ObsClient {
       pendingProgramSwitch: next ? this.state.pendingProgramSwitch : null,
     });
   }
+
   toggleStream() {
     return this.obs.call("ToggleStream");
   }
+
   toggleRecord() {
     return this.obs.call("ToggleRecord");
   }
+
   toggleRecordPause() {
     return this.obs.call("ToggleRecordPause");
   }
+
   toggleVirtualCam() {
     return this.obs.call("ToggleVirtualCam");
   }
+
   async confirmPendingProgramSwitch() {
     const pending = this.state.pendingProgramSwitch;
     if (!pending) {
@@ -540,6 +884,7 @@ export class ObsClient {
     this.update({ pendingProgramSwitch: null });
     await this.sendProgramScene(pending.sceneName, pending.requestedFrom);
   }
+
   cancelPendingProgramSwitch() {
     this.update({ pendingProgramSwitch: null });
   }

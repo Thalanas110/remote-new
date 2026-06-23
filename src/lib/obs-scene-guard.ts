@@ -21,9 +21,7 @@ const RAINBOW_SATURATION_MIN = 0.45;
 const RAINBOW_CENTER_BRIGHT_RATIO_MIN = 0.75;
 const RAINBOW_BLACK_RATIO_MAX = 0.12;
 
-export type SceneImageGuardReason =
-  | "fullBlack"
-  | "possibleTransmitterFallback";
+export type SceneImageGuardReason = "fullBlack" | "possibleTransmitterFallback";
 export type SourceHealthGuardReason = "frozenSource" | "laggySource";
 export type SceneGuardReason = SceneImageGuardReason | SourceHealthGuardReason;
 export type SceneGuardStatus = "healthy" | "flagged" | "unknown";
@@ -104,10 +102,7 @@ export function formatSceneGuardReason(reason: SceneGuardReason) {
   }
 }
 
-export function isSceneImageFresh(
-  image: SceneImageGuardState | undefined,
-  now: number,
-) {
+export function isSceneImageFresh(image: SceneImageGuardState | undefined, now: number) {
   if (image?.lastCheckedAt == null) {
     return false;
   }
@@ -184,10 +179,7 @@ function readRegionSignal(
         brightPixels++;
       }
 
-      if (
-        luma >= WHITE_NEUTRAL_LUMA_MIN &&
-        chroma <= WHITE_NEUTRAL_CHROMA_MAX
-      ) {
+      if (luma >= WHITE_NEUTRAL_LUMA_MIN && chroma <= WHITE_NEUTRAL_CHROMA_MAX) {
         whiteNeutralPixels++;
       }
 
@@ -287,20 +279,8 @@ function classifyRainbowBarColor(red: number, green: number, blue: number) {
   return "other";
 }
 
-function readRainbowBarScore(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-) {
-  const expectedBars = [
-    "white",
-    "yellow",
-    "cyan",
-    "green",
-    "magenta",
-    "red",
-    "blue",
-  ] as const;
+function readRainbowBarScore(data: Uint8ClampedArray, width: number, height: number) {
+  const expectedBars = ["white", "yellow", "cyan", "green", "magenta", "red", "blue"] as const;
   let matches = 0;
 
   for (let index = 0; index < expectedBars.length; index++) {
@@ -314,10 +294,7 @@ function readRainbowBarScore(
       0.42,
     );
 
-    if (
-      classifyRainbowBarColor(color.red, color.green, color.blue) ===
-      expectedBars[index]
-    ) {
+    if (classifyRainbowBarColor(color.red, color.green, color.blue) === expectedBars[index]) {
       matches++;
     }
   }
@@ -353,12 +330,7 @@ export function analyzeSceneGuardPixels({
     }
   }
 
-  const topBand = readAverageBandLuma(
-    data,
-    width,
-    0,
-    Math.max(1, Math.floor(height / 6)),
-  );
+  const topBand = readAverageBandLuma(data, width, 0, Math.max(1, Math.floor(height / 6)));
   const middleBand = readAverageBandLuma(
     data,
     width,
@@ -371,49 +343,20 @@ export function analyzeSceneGuardPixels({
     Math.max(height - Math.floor(height / 6), 0),
     height,
   );
-  const centerContrast =
-    Math.abs(middleBand - (topBand + bottomBand) / 2) / 255;
-  const brightnessSymmetry =
-    1 - Math.min(1, Math.abs(topBand - bottomBand) / 255);
+  const centerContrast = Math.abs(middleBand - (topBand + bottomBand) / 2) / 255;
+  const brightnessSymmetry = 1 - Math.min(1, Math.abs(topBand - bottomBand) / 255);
   const lowerLeftSignal = readRegionSignal(data, width, height, 0, 0.78, 0.35, 1);
-  const lowerRightSignal = readRegionSignal(
-    data,
-    width,
-    height,
-    0.78,
-    0.84,
-    1,
-    1,
-  );
-  const upperRightSignal = readRegionSignal(
-    data,
-    width,
-    height,
-    0.88,
-    0.02,
-    1,
-    0.18,
-  );
-  const centerSignal = readRegionSignal(
-    data,
-    width,
-    height,
-    0.28,
-    0.28,
-    0.72,
-    0.68,
-  );
+  const lowerRightSignal = readRegionSignal(data, width, height, 0.78, 0.84, 1, 1);
+  const upperRightSignal = readRegionSignal(data, width, height, 0.88, 0.02, 1, 0.18);
+  const centerSignal = readRegionSignal(data, width, height, 0.28, 0.28, 0.72, 0.68);
 
   const averageLuma = pixelCount === 0 ? 0 : totalLuma / pixelCount;
   const blackPixelRatio = pixelCount === 0 ? 0 : blackPixels / pixelCount;
   const averageSaturation = pixelCount === 0 ? 0 : totalSaturation / pixelCount;
   const darkScore = clamp01((TRANSMITTER_DARK_LUMA_MAX - averageLuma) / 12);
-  const blackScore = clamp01(
-    (blackPixelRatio - 0.5) / (TRANSMITTER_BLACK_RATIO_MIN - 0.5),
-  );
+  const blackScore = clamp01((blackPixelRatio - 0.5) / (TRANSMITTER_BLACK_RATIO_MIN - 0.5));
   const lowSaturationScore = clamp01(
-    (TRANSMITTER_SATURATION_MAX - averageSaturation) /
-      TRANSMITTER_SATURATION_MAX,
+    (TRANSMITTER_SATURATION_MAX - averageSaturation) / TRANSMITTER_SATURATION_MAX,
   );
   const lowerLeftOverlayScore = clamp01(
     lowerLeftSignal.whiteNeutralRatio / TRANSMITTER_LOWER_LEFT_OVERLAY_MIN,
@@ -470,10 +413,7 @@ export function classifySceneImageSample(
     reasons.push("fullBlack");
   }
 
-  if (
-    metrics.transmitterScore >= TRANSMITTER_SCORE_MIN ||
-    looksLikeRainbowNoSignal
-  ) {
+  if (metrics.transmitterScore >= TRANSMITTER_SCORE_MIN || looksLikeRainbowNoSignal) {
     reasons.push("possibleTransmitterFallback");
   }
 

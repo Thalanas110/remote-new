@@ -8,9 +8,7 @@ import {
   pickPrimarySceneSource,
 } from "../../../src/lib/obs-source-health.ts";
 
-function createProbeSample(
-  overrides: Partial<Parameters<typeof applySourceHealthProbe>[2]> = {},
-) {
+function createProbeSample(overrides: Partial<Parameters<typeof applySourceHealthProbe>[2]> = {}) {
   return {
     checkedAt: 1_000,
     latencyMs: 35,
@@ -106,11 +104,7 @@ test("applySourceHealthProbe flags laggySource after three slow probes", () => {
     averageFrameRenderTimeMs: 24,
   });
 
-  const first = applySourceHealthProbe(
-    createDefaultSourceHealthGuardState(),
-    primary,
-    slowSample,
-  );
+  const first = applySourceHealthProbe(createDefaultSourceHealthGuardState(), primary, slowSample);
   const second = applySourceHealthProbe(first, primary, {
     ...slowSample,
     checkedAt: 1_050,

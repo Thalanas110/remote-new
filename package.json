@@ -13,7 +13,7 @@
     "test:unit": "node --test --experimental-strip-types \"tests/unit/**/*.test.ts\"",
     "test:integration": "node --test --experimental-strip-types \"tests/integration/**/*.test.ts\"",
     "test:obs-remote-studio": "node --test --experimental-strip-types tests/integration/lib/obs-client.remote-studio.test.ts",
-    "test:obs-scene-guard": "node --test --experimental-strip-types tests/unit/lib/obs-scene-guard.test.ts tests/unit/lib/obs-source-health.test.ts tests/integration/lib/obs-client.remote-studio.test.ts",
+    "test:obs-scene-guard": "node --test --experimental-strip-types tests/unit/lib/obs-scene-guard.test.ts tests/unit/lib/obs-source-health.test.ts tests/integration/lib/obs-client.remote-studio.test.ts tests/contract/obs-panel.scene-guard-contract.test.ts",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

@@ -16,17 +16,17 @@ type BatchRequest = {
 
 type BatchResponse = {
   requestType: string;
-  requestStatus:
-    | { result: true; code: number }
-    | { result: false; code: number; comment: string };
+  requestStatus: { result: true; code: number } | { result: false; code: number; comment: string };
   responseData: unknown;
 };
+
+type FakeObsPayloadHandler = (payload: unknown) => void;
 
 type FakeObs = {
   calls: CallRecord[];
   responses: Map<string, unknown>;
   screenshotResponses: Map<string, unknown>;
-  handlers: Map<string, (payload: any) => void>;
+  handlers: Map<string, FakeObsPayloadHandler>;
   inputList: Array<{
     inputName: string;
     inputKind: string;
@@ -60,6 +60,12 @@ type FakeObs = {
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   trigger: (event: string, payload: unknown) => void;
+};
+
+type ObsClientHarness = {
+  refreshProgramMonitor: () => Promise<void>;
+  runSceneImagePass: () => Promise<void>;
+  runSourceHealthPass: () => Promise<void>;
 };
 
 function createStats(
@@ -151,14 +157,8 @@ function createClient() {
       },
     ],
     sceneItemsByScene: new Map([
-      [
-        "Scene A",
-        [{ sceneItemId: 8, sourceName: "Scene A Camera", sceneItemEnabled: true }],
-      ],
-      [
-        "Scene B",
-        [{ sceneItemId: 11, sourceName: "Scene B Browser", sceneItemEnabled: true }],
-      ],
+      ["Scene A", [{ sceneItemId: 8, sourceName: "Scene A Camera", sceneItemEnabled: true }]],
+      ["Scene B", [{ sceneItemId: 11, sourceName: "Scene B Browser", sceneItemEnabled: true }]],
     ]),
     sourceActivity: new Map([
       ["Scene A Camera", { videoActive: true, videoShowing: true }],
@@ -215,10 +215,7 @@ function createClient() {
 
       for (const request of requests) {
         try {
-          const responseData = await this.call(
-            request.requestType,
-            request.requestData,
-          );
+          const responseData = await this.call(request.requestType, request.requestData);
           results.push({
             requestType: request.requestType,
             requestStatus: { result: true, code: 100 },
@@ -230,8 +227,7 @@ function createClient() {
             requestStatus: {
               result: false,
               code: 500,
-              comment:
-                error instanceof Error ? error.message : "batch request failed",
+              comment: error instanceof Error ? error.message : "batch request failed",
             },
             responseData: {},
           });
@@ -241,7 +237,7 @@ function createClient() {
       return results;
     },
     on(event, handler) {
-      this.handlers.set(event, handler as (payload: any) => void);
+      this.handlers.set(event, handler as FakeObsPayloadHandler);
     },
     off(event) {
       this.handlers.delete(event);
@@ -287,6 +283,10 @@ function createClient() {
 
 function flushAsyncWork() {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function getObsClientHarness(client: ObsClient) {
+  return client as unknown as ObsClientHarness;
 }
 
 test("remote studio toggle does not call OBS studio mode APIs", async () => {
@@ -335,9 +335,7 @@ test("triggerTransition promotes local preview to OBS program", async () => {
   await client.triggerTransition();
 
   assert.deepEqual(
-    [...fakeObs.calls]
-      .reverse()
-      .find((call) => call.method === "SetCurrentProgramScene"),
+    [...fakeObs.calls].reverse().find((call) => call.method === "SetCurrentProgramScene"),
     {
       method: "SetCurrentProgramScene",
       args: { sceneName: "Scene B" },
@@ -365,10 +363,7 @@ test("connect fetches the initial program monitor frame", async () => {
     fakeObs.calls.some((call) => call.method === "GetSourceScreenshot"),
     true,
   );
-  assert.match(
-    client.state.programMonitor.imageDataUrl ?? "",
-    /^data:image\/jpeg;base64,/,
-  );
+  assert.match(client.state.programMonitor.imageDataUrl ?? "", /^data:image\/jpeg;base64,/);
   assert.equal(client.state.programMonitor.error, undefined);
   assert.equal(typeof client.state.programMonitor.lastUpdatedAt, "number");
 
@@ -444,7 +439,7 @@ test("refresh skips screenshot capture when there is no current scene", async ()
   fakeObs.calls.length = 0;
   client.state.currentScene = null;
 
-  await (client as any).refreshProgramMonitor();
+  await getObsClientHarness(client).refreshProgramMonitor();
 
   assert.deepEqual(
     fakeObs.calls.filter((call) => call.method === "GetSourceScreenshot"),
@@ -494,7 +489,7 @@ test("a scene image pass marks a full-black scene as flagged", async () => {
   });
 
   await client.refreshAll();
-  await (client as any).runSceneImagePass();
+  await getObsClientHarness(client).runSceneImagePass();
 
   assert.deepEqual(client.state.sceneGuard["Scene A"]?.image, {
     status: "flagged",
@@ -508,21 +503,19 @@ test("source-health pass resolves the primary capture source for Scene A", async
   const { client } = createClient();
 
   await client.refreshAll();
-  await (client as any).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
 
-  assert.equal(
-    client.state.sceneGuard["Scene A"]?.sourceHealth.sourceName,
-    "Scene A Camera",
-  );
-  assert.equal(
-    client.state.sceneGuard["Scene A"]?.sourceHealth.sourceKind,
-    "dshow_input",
-  );
+  assert.equal(client.state.sceneGuard["Scene A"]?.sourceHealth.sourceName, "Scene A Camera");
+  assert.equal(client.state.sceneGuard["Scene A"]?.sourceHealth.sourceKind, "dshow_input");
 });
 
 test("three failed source-health probes flag frozenSource", async () => {
   const { client, fakeObs, advanceTime } = createClient();
 
+  fakeObs.responses.set("GetSceneList", {
+    scenes: [{ sceneName: "Scene A" }],
+    currentProgramSceneName: "Scene A",
+  });
   fakeObs.screenshotResponses.set("Scene A Camera", new Error("probe failed"));
   fakeObs.sourceActivity.set("Scene A Camera", {
     videoActive: false,
@@ -530,20 +523,22 @@ test("three failed source-health probes flag frozenSource", async () => {
   });
 
   await client.refreshAll();
-  await (client as any).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
   advanceTime(50);
-  await (client as any).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
   advanceTime(50);
-  await (client as any).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
 
-  assert.deepEqual(client.state.sceneGuard["Scene A"]?.sourceHealth.reasons, [
-    "frozenSource",
-  ]);
+  assert.deepEqual(client.state.sceneGuard["Scene A"]?.sourceHealth.reasons, ["frozenSource"]);
 });
 
 test("three slow source-health probes flag laggySource", async () => {
   const { client, fakeObs, advanceTime } = createClient();
 
+  fakeObs.responses.set("GetSceneList", {
+    scenes: [{ sceneName: "Scene A" }],
+    currentProgramSceneName: "Scene A",
+  });
   fakeObs.onCall = (method) => {
     if (method === "GetSourceScreenshot") {
       advanceTime(160);
@@ -551,13 +546,11 @@ test("three slow source-health probes flag laggySource", async () => {
   };
 
   await client.refreshAll();
-  await (client as any).runSourceHealthPass();
-  await (client as any).runSourceHealthPass();
-  await (client as any).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
 
-  assert.deepEqual(client.state.sceneGuard["Scene A"]?.sourceHealth.reasons, [
-    "laggySource",
-  ]);
+  assert.deepEqual(client.state.sceneGuard["Scene A"]?.sourceHealth.reasons, ["laggySource"]);
 });
 
 test("setScene stores a pending confirmation instead of hard-cutting a flagged source", async () => {

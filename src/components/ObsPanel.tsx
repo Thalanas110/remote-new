@@ -9,16 +9,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import {
-  ArrowRight,
-  Circle,
-  Eye,
-  Pause,
-  Play,
-  Radio,
-  TriangleAlert,
-  Video,
-} from "lucide-react";
+import { ArrowRight, Circle, Eye, Pause, Play, Radio, TriangleAlert, Video } from "lucide-react";
 
 export function ObsPanel() {
   const [s, setS] = useState<ObsState>(defaultObsState);
@@ -36,8 +27,7 @@ export function ObsPanel() {
   const monitor = s.programMonitor;
   const compactSceneCards = s.scenes.length >= 8;
   const pendingProgramSwitch = s.pendingProgramSwitch;
-  const pendingReasonLabels =
-    pendingProgramSwitch?.reasons.map(formatSceneGuardReason) ?? [];
+  const pendingReasonLabels = pendingProgramSwitch?.reasons.map(formatSceneGuardReason) ?? [];
   const pendingActionLabel =
     pendingProgramSwitch?.requestedFrom === "transition"
       ? "finish this transition"
@@ -139,12 +129,8 @@ export function ObsPanel() {
               <Video className="h-5 w-5" />
             </div>
             <div className="min-w-0">
-              <h2 className="truncate text-sm font-semibold tracking-tight">
-                OBS Studio
-              </h2>
-              <p className="truncate text-[11px] text-muted-foreground">
-                WebSocket v5
-              </p>
+              <h2 className="truncate text-sm font-semibold tracking-tight">OBS Studio</h2>
+              <p className="truncate text-[11px] text-muted-foreground">WebSocket v5</p>
             </div>
           </div>
 
@@ -160,9 +146,7 @@ export function ObsPanel() {
             <span
               className="dot"
               style={{
-                background: s.connected
-                  ? "var(--obs)"
-                  : "var(--muted-foreground)",
+                background: s.connected ? "var(--obs)" : "var(--muted-foreground)",
               }}
             />
             {s.connected ? "Online" : "Offline"}
@@ -171,8 +155,7 @@ export function ObsPanel() {
 
         {offline && (
           <div className="mt-3 rounded-xl border border-dashed border-border bg-card/60 px-3 py-2 text-xs text-muted-foreground">
-            OBS is disconnected. The ProPresenter panel can still be used if it
-            is online.
+            OBS is disconnected. The ProPresenter panel can still be used if it is online.
           </div>
         )}
 
@@ -309,9 +292,7 @@ export function ObsPanel() {
             {remoteStudioOn && (
               <button
                 onClick={call(() => obsClient.triggerTransition())}
-                disabled={
-                  offline || !previewScene || previewScene === s.currentScene
-                }
+                disabled={offline || !previewScene || previewScene === s.currentScene}
                 className="btn-tap inline-flex items-center gap-1.5 rounded-lg bg-[var(--obs)]/15 px-3 py-1.5 text-xs font-semibold text-[var(--obs)] hover:bg-[var(--obs)]/25 disabled:opacity-40"
               >
                 Transition <ArrowRight className="h-3.5 w-3.5" />
@@ -331,6 +312,7 @@ export function ObsPanel() {
                 sceneName={sceneName}
                 isProgram={s.currentScene === sceneName}
                 isPreview={remoteStudioOn && previewScene === sceneName}
+                guardState={s.sceneGuard[sceneName]}
                 compact={compactSceneCards}
                 onSelect={call(() => obsClient.setScene(sceneName))}
               />
@@ -346,15 +328,19 @@ function SceneButton({
   sceneName,
   isProgram,
   isPreview,
+  guardState,
   compact,
   onSelect,
 }: {
   sceneName: string;
   isProgram: boolean;
   isPreview: boolean;
+  guardState?: ObsState["sceneGuard"][string];
   compact: boolean;
   onSelect: () => void;
 }) {
+  const flagged = guardState?.status === "flagged";
+
   return (
     <button
       onClick={onSelect}
@@ -365,14 +351,18 @@ function SceneButton({
           ? "border-transparent live-glow"
           : isPreview
             ? "border-[var(--obs)]"
-            : "border-border hover:border-foreground/30"
+            : flagged
+              ? "border-amber-400/80 hover:border-amber-300"
+              : "border-border hover:border-foreground/30"
       }`}
       style={{
         background: isProgram
           ? "color-mix(in oklab, var(--live) 20%, var(--card))"
           : isPreview
             ? "color-mix(in oklab, var(--obs) 14%, var(--card))"
-            : "color-mix(in oklab, var(--card) 80%, transparent)",
+            : flagged
+              ? "color-mix(in oklab, rgb(245 158 11) 10%, var(--card))"
+              : "color-mix(in oklab, var(--card) 80%, transparent)",
       }}
     >
       <div className="flex items-start justify-between gap-2">
@@ -381,15 +371,21 @@ function SceneButton({
         >
           {sceneName}
         </span>
-        {isProgram && (
+        {isProgram ? (
           <SceneBadge background="var(--live)" color="white" label="LIVE" />
-        )}
-        {isPreview && !isProgram && (
+        ) : isPreview ? (
           <SceneBadge
             background="color-mix(in oklab, var(--obs) 30%, transparent)"
             color="var(--obs)"
             label="PREV"
           />
+        ) : flagged ? (
+          <SceneBadge background="rgba(245, 158, 11, 0.18)" color="#fbbf24" label="WARN" />
+        ) : null}
+        {flagged && (
+          <span className="sr-only">
+            {guardState?.reasons.map(formatSceneGuardReason).join(", ")}
+          </span>
         )}
       </div>
     </button>

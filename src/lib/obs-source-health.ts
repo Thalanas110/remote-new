@@ -29,28 +29,25 @@ export function pickPrimarySceneSource(
     sourceName?: string;
     sceneItemEnabled?: boolean;
   }>,
-  inputCatalog: Record<
-    string,
-    { inputKind: string; unversionedInputKind: string | null }
-  >,
+  inputCatalog: Record<string, { inputKind: string; unversionedInputKind: string | null }>,
 ): ScenePrimarySource {
   const candidates = sceneItems
     .filter((item) => item.sceneItemEnabled !== false)
     .map((item) => {
       const sourceName = String(item.sourceName ?? "");
       const catalogEntry = inputCatalog[sourceName];
-      const sourceKind =
-        catalogEntry?.unversionedInputKind ?? catalogEntry?.inputKind ?? null;
+      const sourceKind = catalogEntry?.unversionedInputKind ?? catalogEntry?.inputKind ?? null;
 
       return {
-        sceneItemId:
-          typeof item.sceneItemId === "number" ? item.sceneItemId : null,
+        sceneItemId: typeof item.sceneItemId === "number" ? item.sceneItemId : null,
         sourceName: sourceName || null,
         sourceKind,
       };
     })
     .filter(
-      (candidate): candidate is {
+      (
+        candidate,
+      ): candidate is {
         sceneItemId: number | null;
         sourceName: string;
         sourceKind: string;
@@ -58,9 +55,7 @@ export function pickPrimarySceneSource(
     );
 
   for (const preferredKind of ["dshow_input", "browser_source"]) {
-    const match = candidates.find(
-      (candidate) => candidate.sourceKind === preferredKind,
-    );
+    const match = candidates.find((candidate) => candidate.sourceKind === preferredKind);
     if (match) {
       return match;
     }
@@ -75,10 +70,7 @@ export function pickPrimarySceneSource(
   );
 }
 
-export function isSourceHealthFresh(
-  state: SourceHealthGuardState | undefined,
-  now: number,
-) {
+export function isSourceHealthFresh(state: SourceHealthGuardState | undefined, now: number) {
   if (state?.lastCheckedAt == null) {
     return false;
   }
@@ -106,21 +98,15 @@ export function applySourceHealthProbe(
   }
 
   const hardFailure =
-    !sample.probeOk ||
-    sample.sourceActive === false ||
-    sample.sourceShowing === false;
+    !sample.probeOk || sample.sourceActive === false || sample.sourceShowing === false;
   const slowProbe =
     sample.probeOk &&
     ((sample.latencyMs ?? 0) >= SOURCE_HEALTH_SLOW_PROBE_MS ||
       sample.renderSkippedFramesDelta >= SOURCE_HEALTH_RENDER_SKIPS_THRESHOLD ||
-      sample.averageFrameRenderTimeMs >=
-        SOURCE_HEALTH_RENDER_TIME_MS_THRESHOLD);
+      sample.averageFrameRenderTimeMs >= SOURCE_HEALTH_RENDER_TIME_MS_THRESHOLD);
 
-  const consecutiveFailures = hardFailure
-    ? previous.consecutiveFailures + 1
-    : 0;
-  const consecutiveSlowProbes =
-    !hardFailure && slowProbe ? previous.consecutiveSlowProbes + 1 : 0;
+  const consecutiveFailures = hardFailure ? previous.consecutiveFailures + 1 : 0;
+  const consecutiveSlowProbes = !hardFailure && slowProbe ? previous.consecutiveSlowProbes + 1 : 0;
 
   const reasons =
     consecutiveFailures >= SOURCE_HEALTH_FAILURE_THRESHOLD
@@ -130,16 +116,13 @@ export function applySourceHealthProbe(
         : [];
 
   return {
-    status:
-      reasons.length > 0 ? "flagged" : sample.probeOk ? "healthy" : "unknown",
+    status: reasons.length > 0 ? "flagged" : sample.probeOk ? "healthy" : "unknown",
     reasons: [...reasons],
     sourceName: primary.sourceName,
     sourceKind: primary.sourceKind,
     lastCheckedAt: sample.checkedAt,
     lastHealthyAt:
-      reasons.length === 0 && sample.probeOk
-        ? sample.checkedAt
-        : previous.lastHealthyAt,
+      reasons.length === 0 && sample.probeOk ? sample.checkedAt : previous.lastHealthyAt,
     lastProbeLatencyMs: sample.latencyMs,
     consecutiveFailures,
     consecutiveSlowProbes,
