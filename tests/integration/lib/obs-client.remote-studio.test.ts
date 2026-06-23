@@ -9,18 +9,81 @@ type CallRecord = {
   args?: Record<string, unknown>;
 };
 
+type BatchRequest = {
+  requestType: string;
+  requestData?: Record<string, unknown>;
+};
+
+type BatchResponse = {
+  requestType: string;
+  requestStatus: { result: true; code: number } | { result: false; code: number; comment: string };
+  responseData: unknown;
+};
+
+type FakeObsPayloadHandler = (payload: unknown) => void;
+
 type FakeObs = {
   calls: CallRecord[];
   responses: Map<string, unknown>;
   screenshotResponses: Map<string, unknown>;
-  handlers: Map<string, (payload: any) => void>;
+  handlers: Map<string, FakeObsPayloadHandler>;
+  inputList: Array<{
+    inputName: string;
+    inputKind: string;
+    unversionedInputKind: string;
+  }>;
+  sceneItemsByScene: Map<
+    string,
+    Array<{
+      sceneItemId: number;
+      sourceName: string;
+      sceneItemEnabled: boolean;
+    }>
+  >;
+  sourceActivity: Map<string, { videoActive: boolean; videoShowing: boolean }>;
+  statsQueue: Array<{
+    cpuUsage: number;
+    memoryUsage: number;
+    availableDiskSpace: number;
+    activeFps: number;
+    averageFrameRenderTime: number;
+    renderSkippedFrames: number;
+    renderTotalFrames: number;
+    outputSkippedFrames: number;
+    outputTotalFrames: number;
+  }>;
+  onCall?: (method: string, args?: Record<string, unknown>) => void;
   call: (method: string, args?: Record<string, unknown>) => Promise<unknown>;
+  callBatch: (requests: BatchRequest[]) => Promise<BatchResponse[]>;
   on: (event: string, handler: (...args: unknown[]) => void) => void;
   off: (event: string) => void;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   trigger: (event: string, payload: unknown) => void;
 };
+
+type ObsClientHarness = {
+  refreshProgramMonitor: () => Promise<void>;
+  runSceneImagePass: () => Promise<void>;
+  runSourceHealthPass: () => Promise<void>;
+};
+
+function createStats(
+  overrides: Partial<FakeObs["statsQueue"][number]> = {},
+): FakeObs["statsQueue"][number] {
+  return {
+    cpuUsage: 12,
+    memoryUsage: 450,
+    availableDiskSpace: 1000,
+    activeFps: 60,
+    averageFrameRenderTime: 8,
+    renderSkippedFrames: 0,
+    renderTotalFrames: 1000,
+    outputSkippedFrames: 0,
+    outputTotalFrames: 1000,
+    ...overrides,
+  };
+}
 
 function createClient() {
   let now = 1_000;
@@ -32,7 +95,6 @@ function createClient() {
         blackPixelRatio: 0.04,
         averageSaturation: 0.2,
         centerBrightRatio: 0.25,
-        fingerprint: "0101010101010101",
         transmitterScore: 0.05,
         rainbowBarScore: 0,
       },
@@ -44,7 +106,6 @@ function createClient() {
         blackPixelRatio: 0.04,
         averageSaturation: 0.2,
         centerBrightRatio: 0.25,
-        fingerprint: "1111000011110000",
         transmitterScore: 0.05,
         rainbowBarScore: 0,
       },
@@ -61,6 +122,7 @@ function createClient() {
     },
     now: () => now,
   });
+
   const fakeObs: FakeObs = {
     calls: [],
     responses: new Map<string, unknown>([
@@ -78,16 +140,63 @@ function createClient() {
     screenshotResponses: new Map<string, unknown>([
       ["Scene A", { imageData: "c2NlbmUtYQ==" }],
       ["Scene B", { imageData: "c2NlbmUtYg==" }],
+      ["Scene A Camera", { imageData: "Y2FtLWE=" }],
+      ["Scene B Browser", { imageData: "YnJvd3Nlci1i" }],
     ]),
     handlers: new Map(),
+    inputList: [
+      {
+        inputName: "Scene A Camera",
+        inputKind: "dshow_input",
+        unversionedInputKind: "dshow_input",
+      },
+      {
+        inputName: "Scene B Browser",
+        inputKind: "browser_source",
+        unversionedInputKind: "browser_source",
+      },
+    ],
+    sceneItemsByScene: new Map([
+      ["Scene A", [{ sceneItemId: 8, sourceName: "Scene A Camera", sceneItemEnabled: true }]],
+      ["Scene B", [{ sceneItemId: 11, sourceName: "Scene B Browser", sceneItemEnabled: true }]],
+    ]),
+    sourceActivity: new Map([
+      ["Scene A Camera", { videoActive: true, videoShowing: true }],
+      ["Scene B Browser", { videoActive: true, videoShowing: true }],
+    ]),
+    statsQueue: [],
     async call(method, args) {
+      this.onCall?.(method, args);
       this.calls.push({ method, args });
 
+      if (method === "GetInputList") {
+        return { inputs: this.inputList };
+      }
+
+      if (method === "GetSceneItemList") {
+        return {
+          sceneItems: this.sceneItemsByScene.get(String(args?.sceneName ?? "")) ?? [],
+        };
+      }
+
+      if (method === "GetSourceActive") {
+        return (
+          this.sourceActivity.get(String(args?.sourceName ?? "")) ?? {
+            videoActive: false,
+            videoShowing: false,
+          }
+        );
+      }
+
+      if (method === "GetStats") {
+        return this.statsQueue.shift() ?? createStats();
+      }
+
       if (method === "GetSourceScreenshot") {
-        const sceneName = String(args?.sourceName ?? "");
-        const response = this.screenshotResponses.get(sceneName);
+        const sourceName = String(args?.sourceName ?? "");
+        const response = this.screenshotResponses.get(sourceName);
         if (response == null) {
-          throw new Error(`No fake screenshot response for ${sceneName}`);
+          throw new Error(`No fake screenshot response for ${sourceName}`);
         }
         if (response instanceof Error) {
           throw response;
@@ -101,8 +210,34 @@ function createClient() {
       }
       return response ?? {};
     },
+    async callBatch(requests) {
+      const results: BatchResponse[] = [];
+
+      for (const request of requests) {
+        try {
+          const responseData = await this.call(request.requestType, request.requestData);
+          results.push({
+            requestType: request.requestType,
+            requestStatus: { result: true, code: 100 },
+            responseData,
+          });
+        } catch (error) {
+          results.push({
+            requestType: request.requestType,
+            requestStatus: {
+              result: false,
+              code: 500,
+              comment: error instanceof Error ? error.message : "batch request failed",
+            },
+            responseData: {},
+          });
+        }
+      }
+
+      return results;
+    },
     on(event, handler) {
-      this.handlers.set(event, handler as (payload: any) => void);
+      this.handlers.set(event, handler as FakeObsPayloadHandler);
     },
     off(event) {
       this.handlers.delete(event);
@@ -148,6 +283,10 @@ function createClient() {
 
 function flushAsyncWork() {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function getObsClientHarness(client: ObsClient) {
+  return client as unknown as ObsClientHarness;
 }
 
 test("remote studio toggle does not call OBS studio mode APIs", async () => {
@@ -198,8 +337,8 @@ test("triggerTransition promotes local preview to OBS program", async () => {
   assert.deepEqual(
     [...fakeObs.calls].reverse().find((call) => call.method === "SetCurrentProgramScene"),
     {
-    method: "SetCurrentProgramScene",
-    args: { sceneName: "Scene B" },
+      method: "SetCurrentProgramScene",
+      args: { sceneName: "Scene B" },
     },
   );
 });
@@ -224,10 +363,7 @@ test("connect fetches the initial program monitor frame", async () => {
     fakeObs.calls.some((call) => call.method === "GetSourceScreenshot"),
     true,
   );
-  assert.match(
-    client.state.programMonitor.imageDataUrl ?? "",
-    /^data:image\/jpeg;base64,/,
-  );
+  assert.match(client.state.programMonitor.imageDataUrl ?? "", /^data:image\/jpeg;base64,/);
   assert.equal(client.state.programMonitor.error, undefined);
   assert.equal(typeof client.state.programMonitor.lastUpdatedAt, "number");
 
@@ -253,13 +389,13 @@ test("program scene changes trigger an immediate monitor refresh", async () => {
           call.args?.imageWidth === 960,
       ),
     {
-    method: "GetSourceScreenshot",
-    args: {
-      sourceName: "Scene B",
-      imageFormat: "jpeg",
-      imageWidth: 960,
-      imageCompressionQuality: 75,
-    },
+      method: "GetSourceScreenshot",
+      args: {
+        sourceName: "Scene B",
+        imageFormat: "jpeg",
+        imageWidth: 960,
+        imageCompressionQuality: 75,
+      },
     },
   );
   assert.equal(client.state.currentScene, "Scene B");
@@ -303,7 +439,7 @@ test("refresh skips screenshot capture when there is no current scene", async ()
   fakeObs.calls.length = 0;
   client.state.currentScene = null;
 
-  await (client as any).refreshProgramMonitor();
+  await getObsClientHarness(client).refreshProgramMonitor();
 
   assert.deepEqual(
     fakeObs.calls.filter((call) => call.method === "GetSourceScreenshot"),
@@ -318,11 +454,29 @@ test("refreshAll seeds new scene guard entries as unknown", async () => {
 
   await client.refreshAll();
 
-  assert.equal(client.state.sceneGuard["Scene A"]?.status, "unknown");
-  assert.equal(client.state.sceneGuard["Scene B"]?.status, "unknown");
+  assert.deepEqual(client.state.sceneGuard["Scene A"], {
+    status: "unknown",
+    reasons: [],
+    image: {
+      status: "unknown",
+      reasons: [],
+      lastCheckedAt: null,
+    },
+    sourceHealth: {
+      status: "unknown",
+      reasons: [],
+      sourceName: null,
+      sourceKind: null,
+      lastCheckedAt: null,
+      lastHealthyAt: null,
+      lastProbeLatencyMs: null,
+      consecutiveFailures: 0,
+      consecutiveSlowProbes: 0,
+    },
+  });
 });
 
-test("a scene guard pass marks a full-black scene as flagged", async () => {
+test("a scene image pass marks a full-black scene as flagged", async () => {
   const { client, analysisByImage } = createClient();
 
   analysisByImage.set("data:image/jpeg;base64,c2NlbmUtYQ==", {
@@ -330,78 +484,166 @@ test("a scene guard pass marks a full-black scene as flagged", async () => {
     blackPixelRatio: 1,
     averageSaturation: 0,
     centerBrightRatio: 0,
-    fingerprint: "0000000000000000",
     transmitterScore: 0.02,
     rainbowBarScore: 0,
   });
 
   await client.refreshAll();
-  await (client as any).runSceneGuardPass();
+  await getObsClientHarness(client).runSceneImagePass();
 
-  assert.deepEqual(client.state.sceneGuard["Scene A"], {
+  assert.deepEqual(client.state.sceneGuard["Scene A"]?.image, {
     status: "flagged",
     reasons: ["fullBlack"],
     lastCheckedAt: 1_000,
-    lastFingerprint: "0000000000000000",
-    unchangedCount: 1,
   });
+  assert.deepEqual(client.state.sceneGuard["Scene A"]?.reasons, ["fullBlack"]);
 });
 
-test("three unchanged passes flag a scene as frozen", async () => {
+test("source-health pass resolves the primary capture source for Scene A", async () => {
+  const { client } = createClient();
+
+  await client.refreshAll();
+  await getObsClientHarness(client).runSourceHealthPass();
+
+  assert.equal(client.state.sceneGuard["Scene A"]?.sourceHealth.sourceName, "Scene A Camera");
+  assert.equal(client.state.sceneGuard["Scene A"]?.sourceHealth.sourceKind, "dshow_input");
+});
+
+test("three failed source-health probes flag frozenSource", async () => {
   const { client, fakeObs, advanceTime } = createClient();
 
   fakeObs.responses.set("GetSceneList", {
     scenes: [{ sceneName: "Scene A" }],
     currentProgramSceneName: "Scene A",
   });
+  fakeObs.screenshotResponses.set("Scene A Camera", new Error("probe failed"));
+  fakeObs.sourceActivity.set("Scene A Camera", {
+    videoActive: false,
+    videoShowing: false,
+  });
 
   await client.refreshAll();
-  await (client as any).runSceneGuardPass();
-  advanceTime(1_000);
-  await (client as any).runSceneGuardPass();
-  advanceTime(1_000);
-  await (client as any).runSceneGuardPass();
+  await getObsClientHarness(client).runSourceHealthPass();
+  advanceTime(50);
+  await getObsClientHarness(client).runSourceHealthPass();
+  advanceTime(50);
+  await getObsClientHarness(client).runSourceHealthPass();
 
-  assert.deepEqual(client.state.sceneGuard["Scene A"]?.reasons, ["frozen"]);
+  assert.deepEqual(client.state.sceneGuard["Scene A"]?.sourceHealth.reasons, ["frozenSource"]);
 });
 
-test("setScene stores a pending confirmation instead of hard-cutting a flagged scene", async () => {
+test("three slow source-health probes flag laggySource", async () => {
   const { client, fakeObs, advanceTime } = createClient();
+
+  fakeObs.responses.set("GetSceneList", {
+    scenes: [{ sceneName: "Scene A" }],
+    currentProgramSceneName: "Scene A",
+  });
+  fakeObs.onCall = (method) => {
+    if (method === "GetSourceScreenshot") {
+      advanceTime(160);
+    }
+  };
+
+  await client.refreshAll();
+  await getObsClientHarness(client).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
+  await getObsClientHarness(client).runSourceHealthPass();
+
+  assert.deepEqual(client.state.sceneGuard["Scene A"]?.sourceHealth.reasons, ["laggySource"]);
+});
+
+test("setScene stores a pending confirmation instead of hard-cutting a flagged source", async () => {
+  const { client } = createClient();
 
   client.state.sceneGuard["Scene B"] = {
     status: "flagged",
-    reasons: ["frozen"],
-    lastCheckedAt: 1_000,
-    lastFingerprint: "1111000011110000",
-    unchangedCount: 3,
-  };
-  advanceTime(1_000);
+    reasons: ["laggySource"],
+    image: {
+      status: "healthy",
+      reasons: [],
+      lastCheckedAt: 1_000,
+    },
+    sourceHealth: {
+      status: "flagged",
+      reasons: ["laggySource"],
+      sourceName: "Scene B Browser",
+      sourceKind: "browser_source",
+      lastCheckedAt: 1_000,
+      lastHealthyAt: 900,
+      lastProbeLatencyMs: 180,
+      consecutiveFailures: 0,
+      consecutiveSlowProbes: 3,
+    },
+  } as never;
 
   await client.setScene("Scene B");
 
-  assert.deepEqual(
-    fakeObs.calls.filter((call) => call.method === "SetCurrentProgramScene"),
-    [],
-  );
   assert.deepEqual(client.state.pendingProgramSwitch, {
     sceneName: "Scene B",
-    reasons: ["frozen"],
+    reasons: ["laggySource"],
     requestedFrom: "directCut",
   });
 });
 
-test("disabled scene guard allows a flagged scene to switch immediately", async () => {
+test("stale source-health data degrades to unknown and does not block a switch", async () => {
   const { client, fakeObs, advanceTime } = createClient();
+
+  client.state.sceneGuard["Scene B"] = {
+    status: "flagged",
+    reasons: ["laggySource"],
+    image: {
+      status: "healthy",
+      reasons: [],
+      lastCheckedAt: 1_000,
+    },
+    sourceHealth: {
+      status: "flagged",
+      reasons: ["laggySource"],
+      sourceName: "Scene B Browser",
+      sourceKind: "browser_source",
+      lastCheckedAt: 1_000,
+      lastHealthyAt: 900,
+      lastProbeLatencyMs: 190,
+      consecutiveFailures: 0,
+      consecutiveSlowProbes: 3,
+    },
+  } as never;
+  advanceTime(300);
+
+  await client.setScene("Scene B");
+
+  assert.deepEqual(fakeObs.calls.at(-1), {
+    method: "SetCurrentProgramScene",
+    args: { sceneName: "Scene B" },
+  });
+  assert.equal(client.state.pendingProgramSwitch, null);
+});
+
+test("disabled scene guard allows a flagged scene to switch immediately", async () => {
+  const { client, fakeObs } = createClient();
 
   client.toggleSceneGuard();
   client.state.sceneGuard["Scene B"] = {
     status: "flagged",
-    reasons: ["frozen"],
-    lastCheckedAt: 1_000,
-    lastFingerprint: "1111000011110000",
-    unchangedCount: 3,
-  };
-  advanceTime(1_000);
+    reasons: ["laggySource"],
+    image: {
+      status: "healthy",
+      reasons: [],
+      lastCheckedAt: 1_000,
+    },
+    sourceHealth: {
+      status: "flagged",
+      reasons: ["laggySource"],
+      sourceName: "Scene B Browser",
+      sourceKind: "browser_source",
+      lastCheckedAt: 1_000,
+      lastHealthyAt: 900,
+      lastProbeLatencyMs: 180,
+      consecutiveFailures: 0,
+      consecutiveSlowProbes: 3,
+    },
+  } as never;
 
   await client.setScene("Scene B");
 
@@ -449,25 +691,33 @@ test("cancelPendingProgramSwitch clears the pending scene without switching", ()
 });
 
 test("triggerTransition opens confirmation when the staged preview is flagged", async () => {
-  const { client, fakeObs, advanceTime } = createClient();
+  const { client } = createClient();
 
   client.toggleRemoteStudio();
   await client.setScene("Scene B");
   client.state.sceneGuard["Scene B"] = {
     status: "flagged",
     reasons: ["possibleTransmitterFallback"],
-    lastCheckedAt: 1_000,
-    lastFingerprint: "1111000011110000",
-    unchangedCount: 1,
-  };
-  advanceTime(1_000);
+    image: {
+      status: "flagged",
+      reasons: ["possibleTransmitterFallback"],
+      lastCheckedAt: 1_000,
+    },
+    sourceHealth: {
+      status: "healthy",
+      reasons: [],
+      sourceName: "Scene B Browser",
+      sourceKind: "browser_source",
+      lastCheckedAt: 1_000,
+      lastHealthyAt: 1_000,
+      lastProbeLatencyMs: 30,
+      consecutiveFailures: 0,
+      consecutiveSlowProbes: 0,
+    },
+  } as never;
 
   await client.triggerTransition();
 
-  assert.deepEqual(
-    fakeObs.calls.filter((call) => call.method === "SetCurrentProgramScene"),
-    [],
-  );
   assert.deepEqual(client.state.pendingProgramSwitch, {
     sceneName: "Scene B",
     reasons: ["possibleTransmitterFallback"],
