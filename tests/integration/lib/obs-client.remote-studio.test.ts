@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ObsClient } from "./obs-client.ts";
-import type { SceneGuardMetrics } from "./obs-scene-guard.ts";
+import { ObsClient } from "../../../src/lib/obs-client.ts";
+import type { SceneGuardMetrics } from "../../../src/lib/obs-scene-guard.ts";
 
 type CallRecord = {
   method: string;

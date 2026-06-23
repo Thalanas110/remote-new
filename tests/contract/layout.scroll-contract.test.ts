@@ -45,9 +45,9 @@ test("OBS panel keeps scenes in a dense matrix without search or pin workflows",
   assert.doesNotMatch(obsPanelSource, /Quick Switch/);
   assert.doesNotMatch(obsPanelSource, /Filter scenes/);
   assert.doesNotMatch(obsPanelSource, /Pin the scenes/);
-  assert.match(obsPanelSource, /className="mt-4 flex flex-1 min-h-0 flex-col"/);
+  assert.match(obsPanelSource, /className="mt-4 flex min-h-0 flex-1 flex-col"/);
   assert.match(
     obsPanelSource,
-    /grid h-full auto-rows-fr gap-2 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4/,
+    /grid h-full auto-rows-fr grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4/,
   );
 });

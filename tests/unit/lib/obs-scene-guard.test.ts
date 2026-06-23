@@ -7,7 +7,7 @@ import {
   formatSceneGuardReason,
   isSceneGuardFresh,
   analyzeSceneGuardPixels,
-} from "./obs-scene-guard.ts";
+} from "../../../src/lib/obs-scene-guard.ts";
 
 function createMetrics(
   overrides: Partial<ReturnType<typeof analyzeSceneGuardPixels>> = {},
