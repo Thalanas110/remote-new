@@ -1,18 +1,14 @@
 export const SCENE_GUARD_ANALYSIS_WIDTH = 96;
 export const SCENE_GUARD_ANALYSIS_FORMAT = "jpeg";
 export const SCENE_GUARD_ANALYSIS_QUALITY = 40;
-export const SCENE_GUARD_STALE_MS = 10_000;
+export const SCENE_IMAGE_STALE_MS = 10_000;
 
 const FULL_BLACK_LUMA_MAX = 6;
 const FULL_BLACK_RATIO_MIN = 0.92;
-const FROZEN_FRAME_THRESHOLD = 3;
 const TRANSMITTER_SCORE_MIN = 0.78;
 const BRIGHT_PIXEL_LUMA_MIN = 55;
 const WHITE_NEUTRAL_LUMA_MIN = 75;
 const WHITE_NEUTRAL_CHROMA_MAX = 24;
-const FROZEN_STATIC_GRAPHIC_SATURATION_MIN = 0.18;
-const FROZEN_STATIC_GRAPHIC_CENTER_BRIGHT_RATIO_MIN = 0.45;
-const FROZEN_STATIC_GRAPHIC_BLACK_RATIO_MAX = 0.35;
 const TRANSMITTER_DARK_LUMA_MAX = 18;
 const TRANSMITTER_BLACK_RATIO_MIN = 0.65;
 const TRANSMITTER_SATURATION_MAX = 0.08;
@@ -25,20 +21,36 @@ const RAINBOW_SATURATION_MIN = 0.45;
 const RAINBOW_CENTER_BRIGHT_RATIO_MIN = 0.75;
 const RAINBOW_BLACK_RATIO_MAX = 0.12;
 
-export type SceneGuardReason =
+export type SceneImageGuardReason =
   | "fullBlack"
-  | "frozen"
-  | "possibleTransmitterFallback"
-  | "possibleRainbowNoSignal";
-
+  | "possibleTransmitterFallback";
+export type SourceHealthGuardReason = "frozenSource" | "laggySource";
+export type SceneGuardReason = SceneImageGuardReason | SourceHealthGuardReason;
 export type SceneGuardStatus = "healthy" | "flagged" | "unknown";
+
+export type SceneImageGuardState = {
+  status: SceneGuardStatus;
+  reasons: SceneImageGuardReason[];
+  lastCheckedAt: number | null;
+};
+
+export type SourceHealthGuardState = {
+  status: SceneGuardStatus;
+  reasons: SourceHealthGuardReason[];
+  sourceName: string | null;
+  sourceKind: string | null;
+  lastCheckedAt: number | null;
+  lastHealthyAt: number | null;
+  lastProbeLatencyMs: number | null;
+  consecutiveFailures: number;
+  consecutiveSlowProbes: number;
+};
 
 export type SceneGuardState = {
   status: SceneGuardStatus;
   reasons: SceneGuardReason[];
-  lastCheckedAt: number | null;
-  lastFingerprint: string | null;
-  unchangedCount: number;
+  image: SceneImageGuardState;
+  sourceHealth: SourceHealthGuardState;
 };
 
 export type SceneGuardMetrics = {
@@ -46,43 +58,61 @@ export type SceneGuardMetrics = {
   blackPixelRatio: number;
   averageSaturation: number;
   centerBrightRatio: number;
-  fingerprint: string;
   transmitterScore: number;
   rainbowBarScore: number;
 };
 
-export function createDefaultSceneGuardState(): SceneGuardState {
+export function createDefaultSceneImageGuardState(): SceneImageGuardState {
   return {
     status: "unknown",
     reasons: [],
     lastCheckedAt: null,
-    lastFingerprint: null,
-    unchangedCount: 0,
   };
+}
+
+export function createDefaultSourceHealthGuardState(): SourceHealthGuardState {
+  return {
+    status: "unknown",
+    reasons: [],
+    sourceName: null,
+    sourceKind: null,
+    lastCheckedAt: null,
+    lastHealthyAt: null,
+    lastProbeLatencyMs: null,
+    consecutiveFailures: 0,
+    consecutiveSlowProbes: 0,
+  };
+}
+
+export function createDefaultSceneGuardState(): SceneGuardState {
+  return composeSceneGuardState({
+    image: createDefaultSceneImageGuardState(),
+    sourceHealth: createDefaultSourceHealthGuardState(),
+  });
 }
 
 export function formatSceneGuardReason(reason: SceneGuardReason) {
   switch (reason) {
     case "fullBlack":
       return "Full black";
-    case "frozen":
-      return "Frozen";
     case "possibleTransmitterFallback":
       return "Possible transmitter fallback screen";
-    case "possibleRainbowNoSignal":
-      return "Possible rainbow no-signal screen";
+    case "frozenSource":
+      return "Frozen source";
+    case "laggySource":
+      return "Laggy source";
   }
 }
 
-export function isSceneGuardFresh(
-  sceneGuard: SceneGuardState | undefined,
+export function isSceneImageFresh(
+  image: SceneImageGuardState | undefined,
   now: number,
 ) {
-  if (sceneGuard?.lastCheckedAt == null) {
+  if (image?.lastCheckedAt == null) {
     return false;
   }
 
-  return now - sceneGuard.lastCheckedAt <= SCENE_GUARD_STALE_MS;
+  return now - image.lastCheckedAt <= SCENE_IMAGE_STALE_MS;
 }
 
 function toLuma(red: number, green: number, blue: number) {
@@ -121,43 +151,6 @@ function readAverageBandLuma(
   }
 
   return samples === 0 ? 0 : total / samples;
-}
-
-function buildFingerprint(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-) {
-  const columns = 4;
-  const rows = 4;
-  const cells: number[] = [];
-
-  for (let row = 0; row < rows; row++) {
-    const startY = Math.floor((row / rows) * height);
-    const endY = Math.floor(((row + 1) / rows) * height);
-
-    for (let column = 0; column < columns; column++) {
-      const startX = Math.floor((column / columns) * width);
-      const endX = Math.floor(((column + 1) / columns) * width);
-
-      let total = 0;
-      let samples = 0;
-
-      for (let y = startY; y < endY; y++) {
-        for (let x = startX; x < endX; x++) {
-          const offset = (y * width + x) * 4;
-          total += toLuma(data[offset], data[offset + 1], data[offset + 2]);
-          samples++;
-        }
-      }
-
-      cells.push(samples === 0 ? 0 : total / samples);
-    }
-  }
-
-  return cells
-    .map((value) => Math.round(value).toString(16).padStart(2, "0"))
-    .join("");
 }
 
 function readRegionSignal(
@@ -378,8 +371,10 @@ export function analyzeSceneGuardPixels({
     Math.max(height - Math.floor(height / 6), 0),
     height,
   );
-  const centerContrast = Math.abs(middleBand - (topBand + bottomBand) / 2) / 255;
-  const brightnessSymmetry = 1 - Math.min(1, Math.abs(topBand - bottomBand) / 255);
+  const centerContrast =
+    Math.abs(middleBand - (topBand + bottomBand) / 2) / 255;
+  const brightnessSymmetry =
+    1 - Math.min(1, Math.abs(topBand - bottomBand) / 255);
   const lowerLeftSignal = readRegionSignal(data, width, height, 0, 0.78, 0.35, 1);
   const lowerRightSignal = readRegionSignal(
     data,
@@ -439,7 +434,6 @@ export function analyzeSceneGuardPixels({
     blackPixelRatio,
     averageSaturation,
     centerBrightRatio: centerSignal.brightRatio,
-    fingerprint: buildFingerprint(data, width, height),
     transmitterScore: clamp01(
       darkScore * 0.18 +
         blackScore * 0.2 +
@@ -455,22 +449,14 @@ export function analyzeSceneGuardPixels({
   };
 }
 
-export function classifySceneGuardSample(
-  previous: SceneGuardState,
+export function classifySceneImageSample(
+  previous: SceneImageGuardState,
   metrics: SceneGuardMetrics,
   checkedAt: number,
-): SceneGuardState {
-  const unchangedCount =
-    previous.lastFingerprint && previous.lastFingerprint === metrics.fingerprint
-      ? previous.unchangedCount + 1
-      : 1;
+): SceneImageGuardState {
+  void previous;
 
-  const reasons: SceneGuardReason[] = [];
-  const looksLikeStaticGraphic =
-    metrics.averageSaturation >= FROZEN_STATIC_GRAPHIC_SATURATION_MIN &&
-    metrics.centerBrightRatio >=
-      FROZEN_STATIC_GRAPHIC_CENTER_BRIGHT_RATIO_MIN &&
-    metrics.blackPixelRatio <= FROZEN_STATIC_GRAPHIC_BLACK_RATIO_MAX;
+  const reasons: SceneImageGuardReason[] = [];
   const looksLikeRainbowNoSignal =
     metrics.averageSaturation >= RAINBOW_SATURATION_MIN &&
     metrics.centerBrightRatio >= RAINBOW_CENTER_BRIGHT_RATIO_MIN &&
@@ -485,25 +471,38 @@ export function classifySceneGuardSample(
   }
 
   if (
-    unchangedCount >= FROZEN_FRAME_THRESHOLD &&
-    !looksLikeStaticGraphic
+    metrics.transmitterScore >= TRANSMITTER_SCORE_MIN ||
+    looksLikeRainbowNoSignal
   ) {
-    reasons.push("frozen");
-  }
-
-  if (metrics.transmitterScore >= TRANSMITTER_SCORE_MIN) {
     reasons.push("possibleTransmitterFallback");
-  }
-
-  if (looksLikeRainbowNoSignal) {
-    reasons.push("possibleRainbowNoSignal");
   }
 
   return {
     status: reasons.length > 0 ? "flagged" : "healthy",
     reasons,
     lastCheckedAt: checkedAt,
-    lastFingerprint: metrics.fingerprint,
-    unchangedCount,
+  };
+}
+
+export function composeSceneGuardState({
+  image,
+  sourceHealth,
+}: {
+  image: SceneImageGuardState;
+  sourceHealth: SourceHealthGuardState;
+}): SceneGuardState {
+  const reasons = [...image.reasons, ...sourceHealth.reasons];
+  const status =
+    reasons.length > 0
+      ? "flagged"
+      : image.status === "healthy" && sourceHealth.status === "healthy"
+        ? "healthy"
+        : "unknown";
+
+  return {
+    status,
+    reasons,
+    image,
+    sourceHealth,
   };
 }
