@@ -1,47 +1,40 @@
-export type ProPresenterRequest = {
-  baseUrl: string;
-  path: string;
-  method: "GET" | "POST";
-};
+import type { ProPresenterRequest } from "./propresenter-request.ts";
 
 function buildUrl(baseUrl: string, path: string) {
   return new URL(path, `${baseUrl.replace(/\/+$/, "")}/`).toString();
 }
 
-function looksLikeJson(text: string) {
-  const trimmed = text.trim();
-  return trimmed.startsWith("{") || trimmed.startsWith("[");
-}
-
-export async function requestProPresenter({
-  baseUrl,
-  path,
-  method,
-}: ProPresenterRequest) {
-  const response = await fetch(buildUrl(baseUrl, path), {
-    method,
-    headers: {
-      Accept: "application/json, text/plain;q=0.9, */*;q=0.1",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
-  }
-
-  if (response.status === 204) {
-    return null;
-  }
-
-  const text = await response.text();
-  if (!text) {
-    return null;
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json") || looksLikeJson(text)) {
+function parseText(text: string, contentType: string) {
+  if (!text) return null;
+  if (contentType.includes("application/json") || /^[\s]*[\[{]/.test(text)) {
     return JSON.parse(text);
   }
-
   return text;
+}
+
+function responseError(status: number, statusText: string, text: string) {
+  let detail = text.trim();
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; message?: unknown };
+    const candidate = parsed.error ?? parsed.message;
+    if (typeof candidate === "string") detail = candidate;
+  } catch {
+    // Keep the plain-text response as the error detail.
+  }
+  return new Error([`${status} ${statusText}`.trim(), detail].filter(Boolean).join(": "));
+}
+
+export async function requestProPresenter(request: ProPresenterRequest) {
+  const hasBody = request.body !== undefined;
+  const response = await fetch(buildUrl(request.baseUrl, request.path), {
+    method: request.method,
+    headers: {
+      Accept: "application/json, text/plain;q=0.9, */*;q=0.1",
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
+    },
+    body: hasBody ? JSON.stringify(request.body) : undefined,
+  });
+  const text = response.status === 204 ? "" : await response.text();
+  if (!response.ok) throw responseError(response.status, response.statusText, text);
+  return parseText(text, response.headers.get("content-type") ?? "");
 }

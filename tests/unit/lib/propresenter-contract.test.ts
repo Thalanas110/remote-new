@@ -10,6 +10,7 @@ import {
   parseSlideIndex,
   parseVersion,
 } from "../../../src/lib/propresenter-contract.ts";
+import { proPresenterRequestSchema } from "../../../src/lib/propresenter-request.ts";
 
 test("parseVersion maps documented host fields", () => {
   assert.deepEqual(
@@ -92,4 +93,40 @@ test("normalizeProPresenterBaseUrl accepts HTTP URLs and removes trailing slashe
     "http://192.168.1.20:50001",
   );
   assert.throws(() => normalizeProPresenterBaseUrl("ws://localhost:50001"), /HTTP/i);
+});
+
+test("request schema accepts only supported method and path pairs", () => {
+  assert.equal(
+    proPresenterRequestSchema.safeParse({
+      baseUrl: "http://localhost:50001",
+      method: "GET",
+      path: "/v1/presentation/active/next/trigger",
+    }).success,
+    true,
+  );
+  assert.equal(
+    proPresenterRequestSchema.safeParse({
+      baseUrl: "http://localhost:50001",
+      method: "PUT",
+      path: "/v1/status/audience_screens",
+      body: true,
+    }).success,
+    true,
+  );
+  assert.equal(
+    proPresenterRequestSchema.safeParse({
+      baseUrl: "http://localhost:50001",
+      method: "POST",
+      path: "/v1/presentation/active/next/trigger",
+    }).success,
+    false,
+  );
+  assert.equal(
+    proPresenterRequestSchema.safeParse({
+      baseUrl: "http://localhost:50001",
+      method: "GET",
+      path: "/admin/not-propresenter",
+    }).success,
+    false,
+  );
 });
