@@ -12,7 +12,7 @@ test("ConnectionSettings uses the documented ProPresenter API default port", () 
 
   assert.match(source, /ppUrl: "http:\/\/127\.0\.0\.1:50001"/);
   assert.match(source, /placeholder="http:\/\/192\.168\.1\.20:50001"/);
-  assert.match(source, /network access to the ProPresenter host on port 50001/);
+  assert.match(source, /network access to the\s+ProPresenter host on port 50001/);
 });
 
 test("ConnectionSettings validates and reports ProPresenter connection state", () => {

@@ -15,7 +15,10 @@ const timerPattern = /^\/v1\/timer\/[^/]+\/(start|stop|reset)$/;
 
 export const proPresenterRequestSchema = z
   .object({
-    baseUrl: z.string().url().regex(/^https?:\/\//i, "Base URL must use HTTP or HTTPS"),
+    baseUrl: z
+      .string()
+      .url()
+      .regex(/^https?:\/\//i, "Base URL must use HTTP or HTTPS"),
     path: z
       .string()
       .min(1)

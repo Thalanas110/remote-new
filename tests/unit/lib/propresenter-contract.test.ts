@@ -81,10 +81,7 @@ test("endpoint builders encode only documented values", () => {
     "video_input",
   ]);
   assert.equal(buildClearLayerPath("slide"), "/v1/clear/layer/slide");
-  assert.equal(
-    buildTimerPath("Service Timer", "start"),
-    "/v1/timer/Service%20Timer/start",
-  );
+  assert.equal(buildTimerPath("Service Timer", "start"), "/v1/timer/Service%20Timer/start");
 });
 
 test("normalizeProPresenterBaseUrl accepts HTTP URLs and removes trailing slashes", () => {

@@ -3,10 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-const source = readFileSync(
-  join(process.cwd(), "src/components/ProPresenterPanel.tsx"),
-  "utf8",
-);
+const source = readFileSync(join(process.cwd(), "src/components/ProPresenterPanel.tsx"), "utf8");
 
 test("ProPresenter panel renders connection and command feedback", () => {
   assert.match(source, /!s\.connected\s*\?\s*["']Offline["']/);

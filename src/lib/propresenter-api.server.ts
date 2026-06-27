@@ -6,7 +6,12 @@ function buildUrl(baseUrl: string, path: string) {
 
 function parseText(text: string, contentType: string) {
   if (!text) return null;
-  if (contentType.includes("application/json") || /^[\s]*[\[{]/.test(text)) {
+  const trimmed = text.trimStart();
+  if (
+    contentType.includes("application/json") ||
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[")
+  ) {
     return JSON.parse(text);
   }
   return text;

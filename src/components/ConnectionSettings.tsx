@@ -27,13 +27,7 @@ function load(): Config {
   }
 }
 
-export function ConnectionSettings({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
+export function ConnectionSettings({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [cfg, setCfg] = useState<Config>(DEFAULTS);
   const [busy, setBusy] = useState<"obs" | "pp" | null>(null);
   const [obsErr, setObsErr] = useState<string>();
@@ -89,10 +83,7 @@ export function ConnectionSettings({
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-3 sm:items-center"
       onClick={onClose}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="glass w-full max-w-lg rounded-2xl p-5"
-      >
+      <div onClick={(e) => e.stopPropagation()} className="glass w-full max-w-lg rounded-2xl p-5">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold tracking-tight">Connections</h2>
           <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-white/5">
@@ -191,9 +182,9 @@ export function ConnectionSettings({
           )}
           <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
             Enable <span className="font-semibold">Network</span> in ProPresenter
-            {" -> "}Preferences{" -> "}Network. Stage Deck now relays these requests
-            through its own app server, so the machine hosting this app still needs
-            network access to the ProPresenter host on port 50001.
+            {" -> "}Preferences{" -> "}Network. Stage Deck now relays these requests through its own
+            app server, so the machine hosting this app still needs network access to the
+            ProPresenter host on port 50001.
           </p>
           <button
             onClick={connectPp}
@@ -210,9 +201,7 @@ export function ConnectionSettings({
           </button>
         </div>
 
-        <p className="mt-4 text-[11px] text-muted-foreground">
-          Settings persist on this device.
-        </p>
+        <p className="mt-4 text-[11px] text-muted-foreground">Settings persist on this device.</p>
       </div>
     </div>
   );
