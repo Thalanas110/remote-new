@@ -14,3 +14,21 @@ test("ConnectionSettings uses the documented ProPresenter API default port", () 
   assert.match(source, /placeholder="http:\/\/192\.168\.1\.20:50001"/);
   assert.match(source, /network access to the ProPresenter host on port 50001/);
 });
+
+test("ConnectionSettings validates and reports ProPresenter connection state", () => {
+  const source = readSource("src/components/ConnectionSettings.tsx");
+  assert.match(source, /normalizeProPresenterBaseUrl/);
+  assert.match(source, /ppClient\.subscribe/);
+  assert.match(source, /Connected to/);
+  assert.match(source, /ppState\.degraded/);
+});
+
+test("OBS connection controls remain present and independent", () => {
+  const source = readSource("src/components/ConnectionSettings.tsx");
+  assert.match(
+    source,
+    /await obsClient\.connect\(\{ url: cfg\.obsUrl, password: cfg\.obsPassword \}\)/,
+  );
+  assert.match(source, /Connect OBS/);
+  assert.match(source, /OBS WebSocket/);
+});

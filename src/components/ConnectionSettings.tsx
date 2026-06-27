@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { obsClient } from "@/lib/obs-client";
-import { ppClient } from "@/lib/propresenter-client";
+import { defaultPpState, ppClient, type PpState } from "@/lib/propresenter-client";
+import { normalizeProPresenterBaseUrl } from "@/lib/propresenter-contract";
 import { X, Plug, Loader2 } from "lucide-react";
 
 const LS_KEY = "remote.config.v1";
@@ -37,10 +38,18 @@ export function ConnectionSettings({
   const [busy, setBusy] = useState<"obs" | "pp" | null>(null);
   const [obsErr, setObsErr] = useState<string>();
   const [ppErr, setPpErr] = useState<string>();
+  const [ppState, setPpState] = useState<PpState>(defaultPpState);
 
   useEffect(() => {
     setCfg(load());
   }, [open]);
+
+  useEffect(() => {
+    const unsubscribe = ppClient.subscribe(setPpState);
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   const save = (next: Config) => {
     setCfg(next);
@@ -63,9 +72,11 @@ export function ConnectionSettings({
     setBusy("pp");
     setPpErr(undefined);
     try {
-      await ppClient.connect({ baseUrl: cfg.ppUrl });
-    } catch (e: any) {
-      setPpErr(e?.message || "Failed");
+      const baseUrl = normalizeProPresenterBaseUrl(cfg.ppUrl);
+      save({ ...cfg, ppUrl: baseUrl });
+      await ppClient.connect({ baseUrl });
+    } catch (error) {
+      setPpErr(error instanceof Error ? error.message : "Failed to connect");
     } finally {
       setBusy(null);
     }
@@ -167,7 +178,17 @@ export function ConnectionSettings({
             className="mt-1 w-full rounded-lg border border-border bg-input/40 px-3 py-2 text-sm outline-none focus:border-[var(--pp)]"
             placeholder="http://192.168.1.20:50001"
           />
-          {ppErr && <p className="mt-2 text-xs text-destructive">{ppErr}</p>}
+          {ppState.connected && (
+            <p className="mt-2 text-xs" style={{ color: "var(--pp)" }}>
+              Connected to {ppState.machineName || "ProPresenter"}
+              {ppState.degraded ? " · Degraded" : ""}
+            </p>
+          )}
+          {ppErr && (
+            <p role="alert" className="mt-2 text-xs text-destructive">
+              {ppErr}
+            </p>
+          )}
           <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
             Enable <span className="font-semibold">Network</span> in ProPresenter
             {" -> "}Preferences{" -> "}Network. Stage Deck now relays these requests
