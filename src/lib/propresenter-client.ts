@@ -1,29 +1,31 @@
 import { propresenterRequest } from "./api/propresenter.functions.ts";
+import {
+  PP_PATHS,
+  errorMessage,
+  normalizeProPresenterBaseUrl,
+  parseActivePresentation,
+  parseSlideIndex,
+  parseVersion,
+  type PpPresentationSnapshot,
+} from "./propresenter-contract.ts";
+import type { ProPresenterRequest as PpTransportRequest } from "./propresenter-request.ts";
 
-// ProPresenter REST API client
-// Default host: http://<computer-ip>:50001  (or the custom port set in Network prefs)
+export type { PpTransportRequest };
 
-export type PpConfig = {
-  baseUrl: string; // e.g. http://192.168.1.20:1025
-};
-
-export type PpState = {
+export type PpConfig = { baseUrl: string };
+export type PpActionGroup = "navigation" | "clear" | "timer";
+export type PpState = PpPresentationSnapshot & {
   connected: boolean;
-  version?: string;
-  activePresentationName?: string;
-  currentSlideIndex?: number;
-  totalSlides?: number;
-  stageMessage?: string;
-  error?: string;
+  degraded: boolean;
+  machineName?: string;
+  hostDescription?: string;
+  apiVersion?: string;
+  refreshError?: string;
+  actionError?: string;
+  activeAction?: PpActionGroup;
 };
 
-export const defaultPpState: PpState = { connected: false };
-
-export type PpTransportRequest = {
-  baseUrl: string;
-  path: string;
-  method: "GET" | "POST";
-};
+export const defaultPpState: PpState = { connected: false, degraded: false };
 
 type PpClientDeps = {
   request?: (request: PpTransportRequest) => Promise<unknown>;
@@ -31,188 +33,120 @@ type PpClientDeps = {
   clearIntervalFn?: typeof globalThis.clearInterval;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === "object";
-}
-
-function getVersionLabel(version: unknown) {
-  if (typeof version === "string") {
-    return version;
-  }
-  if (!isRecord(version)) {
-    return "connected";
-  }
-  if (typeof version.name === "string") {
-    return version.name;
-  }
-  if (typeof version.version === "string") {
-    return version.version;
-  }
-  return "connected";
-}
-
-function getActivePresentationName(active: unknown) {
-  if (!isRecord(active)) {
-    return undefined;
-  }
-  if (typeof active.name === "string") {
-    return active.name;
-  }
-  const presentation = active.presentation;
-  if (isRecord(presentation) && typeof presentation.name === "string") {
-    return presentation.name;
-  }
-  return undefined;
-}
-
-function getCurrentSlideIndex(slide: unknown) {
-  if (!isRecord(slide)) {
-    return undefined;
-  }
-  const presentationIndex = slide.presentation_index;
-  if (isRecord(presentationIndex) && typeof presentationIndex.index === "number") {
-    return presentationIndex.index;
-  }
-  if (typeof slide.index === "number") {
-    return slide.index;
-  }
-  return undefined;
-}
-
-function getTotalSlides(active: unknown, slide: unknown) {
-  if (isRecord(slide)) {
-    const presentationIndex = slide.presentation_index;
-    if (isRecord(presentationIndex) && typeof presentationIndex.count === "number") {
-      return presentationIndex.count;
-    }
-    if (Array.isArray(slide.slides)) {
-      return slide.slides.length;
-    }
-  }
-  if (!isRecord(active)) {
-    return undefined;
-  }
-  const presentation = active.presentation;
-  if (isRecord(presentation) && Array.isArray(presentation.slides)) {
-    return presentation.slides.length;
-  }
-  return undefined;
-}
-
-const CLEARABLE_LAYERS = [
-  "audio",
-  "props",
-  "messages",
-  "announcements",
-  "slide",
-  "media",
-  "video_input",
-] as const;
-
 export class PpClient {
   config: PpConfig = { baseUrl: "" };
   state: PpState = { ...defaultPpState };
-  private listeners = new Set<(s: PpState) => void>();
+  private listeners = new Set<(state: PpState) => void>();
   private poll: ReturnType<typeof globalThis.setInterval> | null = null;
-  private readonly request;
-  private readonly setIntervalFn;
-  private readonly clearIntervalFn;
+  private refreshPromise: Promise<void> | null = null;
+  private consecutiveRefreshFailures = 0;
+  private generation = 0;
+  private readonly request: (request: PpTransportRequest) => Promise<unknown>;
+  private readonly setIntervalFn: typeof globalThis.setInterval;
+  private readonly clearIntervalFn: typeof globalThis.clearInterval;
 
   constructor(deps: PpClientDeps = {}) {
-    this.request =
-      deps.request ??
-      ((request: PpTransportRequest) => propresenterRequest({ data: request }));
+    this.request = deps.request ?? ((request) => propresenterRequest({ data: request }));
     this.setIntervalFn = deps.setIntervalFn ?? globalThis.setInterval.bind(globalThis);
-    this.clearIntervalFn =
-      deps.clearIntervalFn ?? globalThis.clearInterval.bind(globalThis);
+    this.clearIntervalFn = deps.clearIntervalFn ?? globalThis.clearInterval.bind(globalThis);
   }
 
-  subscribe(fn: (s: PpState) => void) {
-    this.listeners.add(fn);
-    fn(this.state);
-    return () => this.listeners.delete(fn);
+  subscribe(listener: (state: PpState) => void) {
+    this.listeners.add(listener);
+    listener(this.state);
+    return () => this.listeners.delete(listener);
   }
+
   private update(patch: Partial<PpState>) {
-    this.state = { ...this.state, ...patch };
-    this.listeners.forEach((l) => l(this.state));
+    const next = { ...this.state, ...patch } as PpState & Record<string, unknown>;
+    for (const key of Object.keys(next)) {
+      if (next[key] === undefined) delete next[key];
+    }
+    this.state = next;
+    this.listeners.forEach((listener) => listener(this.state));
   }
 
-  private async req(path: string, method: "GET" | "POST" = "GET") {
-    return this.request({
-      baseUrl: this.config.baseUrl,
-      path,
-      method,
-    });
+  private req(path: string, method: "GET" | "PUT" = "GET", body?: unknown) {
+    return this.request({ baseUrl: this.config.baseUrl, path, method, body });
+  }
+
+  private stopPolling() {
+    if (this.poll !== null) this.clearIntervalFn(this.poll);
+    this.poll = null;
+  }
+
+  private startPolling() {
+    this.stopPolling();
+    this.poll = this.setIntervalFn(() => void this.refresh(), 1500);
   }
 
   async connect(config: PpConfig) {
-    this.config = config;
+    this.stopPolling();
+    const generation = ++this.generation;
+    this.config = { baseUrl: normalizeProPresenterBaseUrl(config.baseUrl) };
+    this.state = { ...defaultPpState };
     try {
-      const version = await this.req("/version");
-      this.update({
-        connected: true,
-        version: getVersionLabel(version),
-        error: undefined,
-      });
+      const host = parseVersion(await this.req(PP_PATHS.version));
+      if (generation !== this.generation) return;
+      this.update({ connected: true, ...host });
       await this.refresh();
-      this.startPolling();
-    } catch (e: any) {
-      this.update({ connected: false, error: e?.message ?? "Failed to connect" });
-      throw e;
+      if (generation === this.generation) this.startPolling();
+    } catch (error) {
+      if (generation === this.generation) {
+        this.update({
+          connected: false,
+          refreshError: errorMessage(error, "Failed to connect"),
+        });
+      }
+      throw error;
     }
   }
 
   disconnect() {
-    if (this.poll) {
-      this.clearIntervalFn(this.poll);
-    }
-    this.poll = null;
-    this.update({ ...defaultPpState });
+    this.generation += 1;
+    this.stopPolling();
+    this.refreshPromise = null;
+    this.consecutiveRefreshFailures = 0;
+    this.state = { ...defaultPpState };
+    this.listeners.forEach((listener) => listener(this.state));
   }
 
-  private startPolling() {
-    if (this.poll) {
-      this.clearIntervalFn(this.poll);
-    }
-    this.poll = this.setIntervalFn(() => {
-      void this.refresh();
-    }, 1500);
+  refresh() {
+    if (this.refreshPromise) return this.refreshPromise;
+    const generation = this.generation;
+    const refreshPromise = (async () => {
+      try {
+        const [activePayload, indexPayload] = await Promise.all([
+          this.req(PP_PATHS.activePresentation),
+          this.req(PP_PATHS.slideIndex),
+        ]);
+        const active = parseActivePresentation(activePayload);
+        const currentSlideIndex = parseSlideIndex(indexPayload);
+        if (generation !== this.generation) return;
+        this.consecutiveRefreshFailures = 0;
+        this.update({
+          connected: true,
+          degraded: false,
+          refreshError: undefined,
+          ...active,
+          currentSlideIndex,
+        });
+      } catch (error) {
+        if (generation !== this.generation) return;
+        this.consecutiveRefreshFailures += 1;
+        this.update({
+          connected: this.consecutiveRefreshFailures < 3,
+          degraded: true,
+          refreshError: errorMessage(error, "Could not refresh ProPresenter"),
+        });
+      }
+    })();
+    this.refreshPromise = refreshPromise;
+    void refreshPromise.finally(() => {
+      if (this.refreshPromise === refreshPromise) this.refreshPromise = null;
+    });
+    return refreshPromise;
   }
-
-  async refresh() {
-    try {
-      const active = await this.req("/v1/presentation/active").catch(() => null);
-      const slide = await this.req("/v1/presentation/slide_index").catch(() => null);
-      this.update({
-        activePresentationName: getActivePresentationName(active),
-        currentSlideIndex: getCurrentSlideIndex(slide),
-        totalSlides: getTotalSlides(active, slide),
-      });
-    } catch {}
-  }
-
-  next() { return this.req("/v1/presentation/active/next/trigger"); }
-  prev() { return this.req("/v1/presentation/active/previous/trigger"); }
-  triggerIndex(i: number) { return this.req(`/v1/presentation/active/${i}/trigger`); }
-  async clearAll() {
-    for (const layer of CLEARABLE_LAYERS) {
-      await this.req(`/v1/clear/layer/${layer}`);
-    }
-  }
-  clearSlide() { return this.req("/v1/clear/layer/slide"); }
-  clearProps() { return this.req("/v1/clear/layer/props"); }
-  clearMessages() { return this.req("/v1/clear/layer/messages"); }
-  clearAudio() { return this.req("/v1/clear/layer/audio"); }
-  clearAnnouncements() { return this.req("/v1/clear/layer/announcements"); }
-  toggleLogo() {
-    return this.req("/v1/status/screens")
-      .then(() => this.req("/v1/trigger/media/next", "POST"))
-      .catch(() => {});
-  }
-  timerStart(id: string) { return this.req(`/v1/timer/${encodeURIComponent(id)}/start`); }
-  timerStop(id: string) { return this.req(`/v1/timer/${encodeURIComponent(id)}/stop`); }
-  timerReset(id: string) { return this.req(`/v1/timer/${encodeURIComponent(id)}/reset`); }
-  audienceScreenToggle() { return this.req("/v1/status/audience_screen"); }
 }
 
 export const ppClient = new PpClient();

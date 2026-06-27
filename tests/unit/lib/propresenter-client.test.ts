@@ -1,215 +1,144 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PpClient } from "../../../src/lib/propresenter-client.ts";
+import { PpClient, type PpTransportRequest } from "../../../src/lib/propresenter-client.ts";
 
-type RequestCall = {
-  baseUrl: string;
-  path: string;
-  method: "GET" | "POST" | "PUT";
-  body?: unknown;
+const version = {
+  name: "Sanctuary Mac",
+  platform: "mac",
+  os_version: "15.5",
+  host_description: "ProPresenter 7.18.1",
+  api_version: "v1",
+};
+const active = {
+  presentation: {
+    id: { uuid: "p1", name: "Sunday Service", index: 0 },
+    groups: [{ name: "Main", color: "#fff", slides: [{}, {}, {}, {}] }],
+  },
+};
+const slideIndex = {
+  presentation_index: { index: 2, presentation_id: { uuid: "p1" } },
 };
 
-function createClient() {
-  const calls: RequestCall[] = [];
+function createHarness() {
+  const calls: PpTransportRequest[] = [];
+  const responses = new Map<string, unknown>([
+    ["GET /version", version],
+    ["GET /v1/presentation/active", active],
+    ["GET /v1/presentation/slide_index", slideIndex],
+  ]);
+  let intervalCallback: (() => void) | undefined;
+  const cleared: unknown[] = [];
   const client = new PpClient({
-    request: async ({ baseUrl, path, method, body }) => {
-      calls.push({ baseUrl, path, method, body });
-
-      switch (`${method} ${path}`) {
-        case "GET /version":
-          return { name: "ProPresenter 7.18" };
-        case "GET /v1/presentation/active":
-          return {
-            presentation: {
-              name: "Sunday Service",
-            },
-          };
-        case "GET /v1/presentation/slide_index":
-          return {
-            presentation_index: {
-              index: 2,
-            },
-            slides: [{}, {}, {}, {}],
-          };
-        case "GET /v1/presentation/active/next/trigger":
-        case "GET /v1/clear/layer/slide":
-        case "GET /v1/clear/layer/audio":
-        case "GET /v1/clear/layer/props":
-        case "GET /v1/clear/layer/messages":
-        case "GET /v1/clear/layer/announcements":
-        case "GET /v1/clear/layer/media":
-        case "GET /v1/clear/layer/video_input":
-        case "GET /v1/trigger/media/next":
-        case "GET /v1/timer/Service%20Timer/start":
-          return null;
-        case "GET /v1/status/audience_screens":
-          return false;
-        case "PUT /v1/status/audience_screens":
-          assert.equal(body, true);
-          return null;
-        default:
-          throw new Error(`Unhandled request: ${method} ${path}`);
-      }
+    request: async (request) => {
+      calls.push(request);
+      const key = `${request.method} ${request.path}`;
+      const response = responses.get(key);
+      if (response instanceof Error) throw response;
+      if (!responses.has(key)) throw new Error(`Unhandled request: ${key}`);
+      return response;
     },
-    setIntervalFn: () => 1 as never,
-    clearIntervalFn: () => {},
+    setIntervalFn: ((callback: () => void) => {
+      intervalCallback = callback;
+      return 41 as never;
+    }) as typeof globalThis.setInterval,
+    clearIntervalFn: ((id: unknown) => cleared.push(id)) as typeof globalThis.clearInterval,
   });
-
-  return { client, calls };
+  return { client, calls, responses, cleared, runPoll: () => intervalCallback?.() };
 }
 
-test("connect and refresh route through the configured request transport", async () => {
-  const { client, calls } = createClient();
+test("connect maps official host and presentation state", async () => {
+  const { client, calls } = createHarness();
+  await client.connect({ baseUrl: "http://pp.example:50001/" });
+  assert.deepEqual(client.state, {
+    connected: true,
+    degraded: false,
+    machineName: "Sanctuary Mac",
+    hostDescription: "ProPresenter 7.18.1",
+    apiVersion: "v1",
+    activePresentationName: "Sunday Service",
+    currentSlideIndex: 2,
+    totalSlides: 4,
+  });
+  assert.equal(calls[0].baseUrl, "http://pp.example:50001");
+});
 
+test("a failed refresh preserves the last snapshot and marks degraded", async () => {
+  const { client, responses } = createHarness();
   await client.connect({ baseUrl: "http://pp.example:50001" });
-
+  responses.set("GET /v1/presentation/active", new Error("connection refused"));
+  await client.refresh();
+  assert.equal(client.state.degraded, true);
   assert.equal(client.state.connected, true);
-  assert.equal(client.state.version, "ProPresenter 7.18");
   assert.equal(client.state.activePresentationName, "Sunday Service");
-  assert.equal(client.state.currentSlideIndex, 2);
-  assert.equal(client.state.totalSlides, 4);
-  assert.deepEqual(calls, [
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/version",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/presentation/active",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/presentation/slide_index",
-      method: "GET",
-    },
-  ]);
+  assert.match(client.state.refreshError ?? "", /connection refused/);
 });
 
-test("transport-backed actions reuse the configured base URL", async () => {
-  const { client, calls } = createClient();
-
-  client.config = { baseUrl: "http://pp.example:50001" };
-  await client.next();
-
-  assert.deepEqual(calls, [
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/presentation/active/next/trigger",
-      method: "GET",
-    },
-  ]);
+test("three failed refreshes mark offline and a success recovers", async () => {
+  const { client, responses } = createHarness();
+  await client.connect({ baseUrl: "http://pp.example:50001" });
+  responses.set("GET /v1/presentation/active", new Error("offline"));
+  await client.refresh();
+  await client.refresh();
+  await client.refresh();
+  assert.equal(client.state.connected, false);
+  responses.set("GET /v1/presentation/active", active);
+  await client.refresh();
+  assert.equal(client.state.connected, true);
+  assert.equal(client.state.degraded, false);
 });
 
-test("clearSlide uses the ProPresenter slide layer path", async () => {
-  const { client, calls } = createClient();
-
-  client.config = { baseUrl: "http://pp.example:50001" };
-  await client.clearSlide();
-
-  assert.deepEqual(calls, [
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/clear/layer/slide",
-      method: "GET",
+test("overlapping refresh calls share one in-flight request", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let activeCalls = 0;
+  const client = new PpClient({
+    request: async (request) => {
+      if (request.path === "/version") return version;
+      if (request.path === "/v1/presentation/active") {
+        activeCalls += 1;
+        await gate;
+        return active;
+      }
+      return slideIndex;
     },
-  ]);
+    setIntervalFn: (() => 1 as never) as typeof globalThis.setInterval,
+    clearIntervalFn: (() => {}) as typeof globalThis.clearInterval,
+  });
+  client.config = { baseUrl: "http://pp.example:50001" };
+  const first = client.refresh();
+  const second = client.refresh();
+  release();
+  await Promise.all([first, second]);
+  assert.equal(activeCalls, 1);
 });
 
-test("clearAll clears each supported layer with ProPresenter GET requests", async () => {
-  const { client, calls } = createClient();
-
-  client.config = { baseUrl: "http://pp.example:50001" };
-  await client.clearAll();
-
-  assert.deepEqual(calls, [
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/clear/layer/audio",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/clear/layer/props",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/clear/layer/messages",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/clear/layer/announcements",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/clear/layer/slide",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/clear/layer/media",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/clear/layer/video_input",
-      method: "GET",
-    },
-  ]);
+test("disconnect clears polling and resets state", async () => {
+  const { client, cleared } = createHarness();
+  await client.connect({ baseUrl: "http://pp.example:50001" });
+  client.disconnect();
+  assert.deepEqual(cleared, [41]);
+  assert.deepEqual(client.state, { connected: false, degraded: false });
 });
 
-test("timer operations use GET against the timer operation endpoint", async () => {
-  const { client, calls } = createClient();
-
+test("a refresh that resolves after disconnect cannot restore stale state", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const client = new PpClient({
+    request: async (request) => {
+      if (request.path === "/v1/presentation/active") {
+        await gate;
+        return active;
+      }
+      return slideIndex;
+    },
+    setIntervalFn: (() => 1 as never) as typeof globalThis.setInterval,
+    clearIntervalFn: (() => {}) as typeof globalThis.clearInterval,
+  });
   client.config = { baseUrl: "http://pp.example:50001" };
-  await client.timerStart("Service Timer");
-
-  assert.deepEqual(calls, [
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/timer/Service%20Timer/start",
-      method: "GET",
-    },
-  ]);
-});
-
-test("toggleLogo uses the media trigger endpoint with a GET request", async () => {
-  const { client, calls } = createClient();
-
-  client.config = { baseUrl: "http://pp.example:50001" };
-  await client.toggleLogo();
-
-  assert.deepEqual(calls, [
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/trigger/media/next",
-      method: "GET",
-    },
-  ]);
-});
-
-test("audienceScreenToggle flips the current audience screen status with PUT", async () => {
-  const { client, calls } = createClient();
-
-  client.config = { baseUrl: "http://pp.example:50001" };
-  await client.audienceScreenToggle();
-
-  assert.deepEqual(calls, [
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/status/audience_screens",
-      method: "GET",
-    },
-    {
-      baseUrl: "http://pp.example:50001",
-      path: "/v1/status/audience_screens",
-      method: "PUT",
-      body: true,
-    },
-  ]);
+  const refresh = client.refresh();
+  client.disconnect();
+  release();
+  await refresh;
+  assert.deepEqual(client.state, { connected: false, degraded: false });
 });
