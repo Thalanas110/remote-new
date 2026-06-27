@@ -1,12 +1,17 @@
 import { propresenterRequest } from "./api/propresenter.functions.ts";
 import {
+  CLEARABLE_LAYERS,
   PP_PATHS,
+  buildClearLayerPath,
+  buildTimerPath,
   errorMessage,
   normalizeProPresenterBaseUrl,
   parseActivePresentation,
   parseSlideIndex,
   parseVersion,
+  type ClearableLayer,
   type PpPresentationSnapshot,
+  type TimerOperation,
 } from "./propresenter-contract.ts";
 import type { ProPresenterRequest as PpTransportRequest } from "./propresenter-request.ts";
 
@@ -146,6 +151,100 @@ export class PpClient {
       if (this.refreshPromise === refreshPromise) this.refreshPromise = null;
     });
     return refreshPromise;
+  }
+
+  private async runAction(
+    group: PpActionGroup,
+    operation: () => Promise<void>,
+    refreshAfter = false,
+  ) {
+    if (this.state.activeAction === group) return;
+    this.update({ activeAction: group, actionError: undefined });
+    try {
+      await operation();
+      if (refreshAfter) await this.refresh();
+    } catch (error) {
+      this.update({ actionError: errorMessage(error, "ProPresenter command failed") });
+      throw error;
+    } finally {
+      if (this.state.activeAction === group) this.update({ activeAction: undefined });
+    }
+  }
+
+  previous() {
+    return this.runAction(
+      "navigation",
+      async () => {
+        await this.req(PP_PATHS.previous);
+      },
+      true,
+    );
+  }
+
+  next() {
+    return this.runAction(
+      "navigation",
+      async () => {
+        await this.req(PP_PATHS.next);
+      },
+      true,
+    );
+  }
+
+  clearLayer(layer: ClearableLayer) {
+    return this.runAction("clear", async () => {
+      await this.req(buildClearLayerPath(layer));
+    });
+  }
+
+  clearSlide() {
+    return this.clearLayer("slide");
+  }
+
+  clearProps() {
+    return this.clearLayer("props");
+  }
+
+  clearMessages() {
+    return this.clearLayer("messages");
+  }
+
+  clearAudio() {
+    return this.clearLayer("audio");
+  }
+
+  clearAnnouncements() {
+    return this.clearLayer("announcements");
+  }
+
+  clearAll() {
+    return this.runAction("clear", async () => {
+      for (const layer of CLEARABLE_LAYERS) {
+        await this.req(buildClearLayerPath(layer));
+      }
+    });
+  }
+
+  private timer(id: string, operation: TimerOperation) {
+    return this.runAction(
+      "timer",
+      async () => {
+        await this.req(buildTimerPath(id, operation));
+      },
+      true,
+    );
+  }
+
+  timerStart(id: string) {
+    return this.timer(id, "start");
+  }
+
+  timerStop(id: string) {
+    return this.timer(id, "stop");
+  }
+
+  timerReset(id: string) {
+    return this.timer(id, "reset");
   }
 }
 
